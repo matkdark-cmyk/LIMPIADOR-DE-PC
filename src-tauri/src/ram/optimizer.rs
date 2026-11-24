@@ -47,7 +47,7 @@ mod win_ram {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
-        SE_PROFILE_SINGLE_PROCESS_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
@@ -94,10 +94,17 @@ mod win_ram {
 
         // 2. Buscar LUID de SeProfileSingleProcessPrivilege
         let mut luid = Default::default();
-        unsafe { LookupPrivilegeValueW(PCWSTR::null(), SE_PROFILE_SINGLE_PROCESS_NAME, &mut luid) }
-            .map_err(|err| {
-                format!("No se pudo consultar el privilegio SeProfileSingleProcessPrivilege: {err}")
-            })?;
+        let priv_name_wide: Vec<u16> = "SeProfileSingleProcessPrivilege\0".encode_utf16().collect();
+        unsafe {
+            LookupPrivilegeValueW(
+                PCWSTR::null(),
+                PCWSTR(priv_name_wide.as_ptr()),
+                &mut luid,
+            )
+        }
+        .map_err(|err| {
+            format!("No se pudo consultar el privilegio SeProfileSingleProcessPrivilege: {err}")
+        })?;
 
         let tp = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,

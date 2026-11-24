@@ -121,7 +121,7 @@ fn extract_from_pe_windows(path: &Path, icon_index: i32) -> Option<String> {
 
             let mut bmp = BITMAP::default();
             let got_obj = GetObjectW(
-                icon_info.hbmColor.into(),
+                icon_info.hbmColor,
                 size_of::<BITMAP>() as i32,
                 Some((&mut bmp as *mut BITMAP).cast()),
             );
@@ -187,10 +187,10 @@ fn extract_from_pe_windows(path: &Path, icon_index: i32) -> Option<String> {
         })();
 
         if !icon_info.hbmColor.is_invalid() {
-            let _ = DeleteObject(icon_info.hbmColor.into());
+            let _ = DeleteObject(icon_info.hbmColor);
         }
         if !icon_info.hbmMask.is_invalid() {
-            let _ = DeleteObject(icon_info.hbmMask.into());
+            let _ = DeleteObject(icon_info.hbmMask);
         }
         let _ = DestroyIcon(hicon_large);
 

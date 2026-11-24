@@ -179,7 +179,7 @@ fn build_manifest(
         let meta = fs::metadata(source)
             .map_err(|err| format!("No se pudo leer metadatos de '{}': {err}", source.display()))?;
         let size = meta.len();
-        let mtime = Some(FileTime::from_last_modification_time(&meta));
+        let mtime = meta.modified().ok().map(FileTime::from_system_time);
         let rel = source
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -243,7 +243,7 @@ fn build_manifest(
                 dest_abs,
                 relative_display: rel.to_string_lossy().to_string(),
                 size_bytes: size,
-                mtime: Some(FileTime::from_last_modification_time(&meta)),
+                mtime: meta.modified().ok().map(FileTime::from_system_time),
             });
         }
     }
