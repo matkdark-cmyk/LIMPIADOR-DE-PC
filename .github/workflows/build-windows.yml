@@ -39,6 +39,7 @@ jobs:
 
       - name: Caché de dependencias de Rust (Cargo)
         uses: swatinem/rust-cache@v2
+        continue-on-error: true
         with:
           workspaces: src-tauri
 
@@ -55,9 +56,9 @@ jobs:
         shell: pwsh
         run: |
           if ("${{ inputs.skip_tests }}" -eq "true") {
-            powershell -ExecutionPolicy Bypass -File .\scripts\build-releases.ps1 -SkipTests
+            & .\scripts\build-releases.ps1 -SkipTests
           } else {
-            powershell -ExecutionPolicy Bypass -File .\scripts\build-releases.ps1
+            & .\scripts\build-releases.ps1
           }
 
       - name: Subir artefactos descargables (.exe, .zip y SHA256SUMS.txt)

@@ -22,6 +22,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 Set-StrictMode -Version Latest
 
 function Write-Step {
@@ -44,6 +47,32 @@ function Assert-ToolAvailable {
     param([string]$ToolName)
     if (-not (Get-Command $ToolName -ErrorAction SilentlyContinue)) {
         Write-FailAndExit "No se encontró la herramienta requerida '$ToolName' en el PATH. Instálala antes de compilar."
+    }
+}
+
+<#
+    Ejecuta herramientas nativas (cargo, npm, npx) evitando que Windows PowerShell 5.1
+    trate las líneas de progreso en stderr (ej. "Compiling ...") como errores fatales.
+    Valida estrictamente $LASTEXITCODE.
+#>
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)][string]$ErrorMessage
+    )
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $global:LASTEXITCODE = 0
+        & $FilePath @Arguments
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $prevPref
+    }
+    if ($exitCode -ne 0) {
+        Write-FailAndExit "$ErrorMessage (código de salida: $exitCode)"
     }
 }
 
@@ -76,33 +105,26 @@ try {
     # Validación de tipos y pruebas unitarias (a menos que se pase -SkipTests)
     if (-not $SkipTests) {
         Write-Step 'Ejecutando verificación estricta de TypeScript (npx tsc --noEmit)'
-        & npx tsc --noEmit
-        if ($LASTEXITCODE -ne 0) {
-            Write-FailAndExit 'Falló la verificación de tipos de TypeScript (npx tsc --noEmit). Corrige los errores antes de empaquetar.'
-        }
+        Invoke-NativeCommand -FilePath 'npx' -Arguments @('tsc', '--noEmit') -ErrorMessage 'Falló la verificación de tipos de TypeScript (npx tsc --noEmit).'
         Write-Success 'TypeScript sin errores'
 
         Write-Step 'Ejecutando suite completa de pruebas unitarias de Rust (cargo test)'
         Push-Location $TauriDir
         try {
-            & cargo test
-            if ($LASTEXITCODE -ne 0) {
-                Write-FailAndExit 'Fallaron una o más pruebas unitarias en cargo test. Empaquetado cancelado.'
-            }
-        } finally {
+            Invoke-NativeCommand -FilePath 'cargo' -Arguments @('test') -ErrorMessage 'Fallaron una o más pruebas unitarias en cargo test.'
+        }
+        finally {
             Pop-Location
         }
         Write-Success 'Todas las pruebas de Rust pasaron en verde'
-    } else {
+    }
+    else {
         Write-Host "`n[AVISO] Se omitieron pruebas previas por parámetro -SkipTests." -ForegroundColor Yellow
     }
 
     # Compilación Release Tauri v2 (genera binario release + instalador NSIS)
     Write-Step 'Compilando DiskVault Clean en modo Release (npm run tauri build)'
-    & npm run tauri build
-    if ($LASTEXITCODE -ne 0) {
-        Write-FailAndExit 'Falló la compilación de producción (npm run tauri build).'
-    }
+    Invoke-NativeCommand -FilePath 'npm' -Arguments @('run', 'tauri', 'build') -ErrorMessage 'Falló la compilación de producción (npm run tauri build).'
     Write-Success 'Compilación Release completada'
 
     # Preparar carpeta release/ limpia
@@ -222,9 +244,9 @@ Gracias por usar DiskVault Clean en su formato 100% Portable.
         $SizeMb = [math]::Round($FileInfo.Length / 1MB, 2)
         $ChecksumLines += "$($HashObj.Hash.ToLowerInvariant())  $($FileInfo.Name)"
         $SummaryRows += [PSCustomObject]@{
-            Archivo   = $FileInfo.Name
-            'Tamaño'  = "$SizeMb MB"
-            Ruta      = $FileInfo.FullName
+            Archivo  = $FileInfo.Name
+            'Tamaño' = "$SizeMb MB"
+            Ruta     = $FileInfo.FullName
         }
     }
 
