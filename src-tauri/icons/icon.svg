@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E3A8A" />
+      <stop offset="100%" stop-color="#2563EB" />
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+  <!-- Base redondeada -->
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="url(#bgGrad)" />
+  <!-- Disco / Plato de almacenamiento -->
+  <circle cx="116" cy="120" r="64" fill="none" stroke="#FFFFFF" stroke-width="14" stroke-opacity="0.95" />
+  <circle cx="116" cy="120" r="22" fill="#FFFFFF" fill-opacity="0.95" />
+  <circle cx="116" cy="120" r="9" fill="#1E3A8A" />
+  <path d="M 116 56 A 64 64 0 0 1 174 93" fill="none" stroke="#93C5FD" stroke-width="8" stroke-linecap="round" />
+  <!-- Escudo / Bóveda de verificación -->
+  <path
+    d="M 182 114 L 222 128 V 164 C 222 192 203 212 182 222 C 161 212 142 192 142 164 V 128 Z"
+    fill="url(#shieldGrad)"
+    stroke="#FFFFFF"
+    stroke-width="6"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 167 167 L 178 178 L 199 155"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

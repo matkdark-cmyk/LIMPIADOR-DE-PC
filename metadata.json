@@ -1,0 +1,6 @@
+{
+  "name": "DiskVault Clean",
+  "description": "Suite de escritorio para Windows de análisis de disco, migración segura al NAS, gestión de programas, limpieza de caché y liberación de RAM.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

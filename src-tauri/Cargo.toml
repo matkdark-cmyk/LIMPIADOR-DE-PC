@@ -1,0 +1,48 @@
+[package]
+name = "diskvault-clean"
+version = "1.0.0"
+description = "DiskVault Clean — Suite de análisis de disco, migración segura al NAS, gestión de apps, limpieza de caché y optimización de RAM para Windows."
+authors = ["DiskVault Clean"]
+edition = "2021"
+
+[lib]
+name = "diskvault_clean_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.32"
+jwalk = "0.8"
+rayon = "1.10"
+trash = "5"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "time"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+filetime = "0.2"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+[target.'cfg(windows)'.dependencies]
+junction = "1"
+winreg = "0.52"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
