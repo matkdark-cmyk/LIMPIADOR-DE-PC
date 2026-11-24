@@ -786,8 +786,7 @@ fn run_clean_inner(
 #[cfg(test)]
 mod tests {
     use super::clean_directory_contents;
-    use filetime::{set_file_mtime, FileTime};
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::time::{Duration, SystemTime};
 
     /// Prueba obligatoria 4: Limpieza resiliente que borra contenido, preserva carpeta padre y reporta bytes.
@@ -810,8 +809,18 @@ mod tests {
         fs::write(&file_recent, vec![b'c'; 512]).unwrap();
 
         let thirty_mins_ago = SystemTime::now() - Duration::from_secs(30 * 60);
-        set_file_mtime(&file_old, FileTime::from_system_time(thirty_mins_ago)).unwrap();
-        set_file_mtime(&file_sub, FileTime::from_system_time(thirty_mins_ago)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&file_old)
+            .unwrap()
+            .set_modified(thirty_mins_ago)
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&file_sub)
+            .unwrap()
+            .set_modified(thirty_mins_ago)
+            .unwrap();
 
         let (freed, deleted, skipped) =
             clean_directory_contents(&temp_root, false, Some(5), None, SystemTime::now());

@@ -1060,8 +1060,7 @@ mod tests {
         discover_firefox_cache_paths, discover_inactive_app_caches_in_roots,
         is_cleaner_target_path_safe, is_safe_browser_cache_path, CacheGroup, SafetyLevel,
     };
-    use filetime::{set_file_mtime, FileTime};
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
@@ -1184,7 +1183,12 @@ mod tests {
         fs::write(&fresh_file, vec![b'y'; 16_384]).unwrap();
 
         let forty_five_days_ago = SystemTime::now() - Duration::from_secs(45 * 86_400);
-        set_file_mtime(&old_file, FileTime::from_system_time(forty_five_days_ago)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&old_file)
+            .unwrap()
+            .set_modified(forty_five_days_ago)
+            .unwrap();
 
         let detected = discover_inactive_app_caches_in_roots(
             &[root.as_path()],

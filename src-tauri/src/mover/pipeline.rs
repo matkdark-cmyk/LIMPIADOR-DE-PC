@@ -2,7 +2,6 @@ use crate::mover::hasher::compute_file_xxhash3;
 use crate::mover::links::{create_transparent_link, is_unc_path, remove_link_only};
 use crate::mover::targets::query_destination_space;
 use crate::security;
-use filetime::FileTime;
 use jwalk::WalkDir;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -11,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
 
 /// Tamaño del bloque de copia por streaming (1 MiB).
@@ -140,7 +139,7 @@ pub struct FileManifestItem {
     pub dest_abs: PathBuf,
     pub relative_display: String,
     pub size_bytes: u64,
-    pub mtime: Option<FileTime>,
+    pub mtime: Option<SystemTime>,
 }
 
 fn normalize_for_compare(path: &Path) -> String {
@@ -179,7 +178,7 @@ fn build_manifest(
         let meta = fs::metadata(source)
             .map_err(|err| format!("No se pudo leer metadatos de '{}': {err}", source.display()))?;
         let size = meta.len();
-        let mtime = meta.modified().ok().map(FileTime::from_system_time);
+        let mtime = meta.modified().ok();
         let rel = source
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -243,7 +242,7 @@ fn build_manifest(
                 dest_abs,
                 relative_display: rel.to_string_lossy().to_string(),
                 size_bytes: size,
-                mtime: meta.modified().ok().map(FileTime::from_system_time),
+                mtime: meta.modified().ok(),
             });
         }
     }
@@ -379,11 +378,10 @@ where
             item.dest_abs.display()
         )
     })?;
-    drop(dst_file);
-
     if let Some(mtime) = item.mtime {
-        let _ = filetime::set_file_mtime(&item.dest_abs, mtime);
+        let _ = dst_file.set_modified(mtime);
     }
+    drop(dst_file);
 
     Ok(())
 }
