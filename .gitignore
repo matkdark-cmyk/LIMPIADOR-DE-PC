@@ -8,3 +8,5 @@ coverage/
 !.env.example
 src-tauri/target/
 src-tauri/gen/
+release/
+

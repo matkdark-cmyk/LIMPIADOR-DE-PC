@@ -1,0 +1,83 @@
+name: Compilar DiskVault Clean (Windows x64)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Omitir pruebas unitarias (compilación más rápida)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Instalador NSIS (.exe) + Portable (.zip)
+    runs-on: windows-latest
+
+    steps:
+      - name: Descargar código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configurar Rust estable (Windows MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Caché de dependencias de Rust (Cargo)
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependencias de Node.js
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install
+          }
+
+      - name: Compilar y empaquetar Instalador .exe y Portable .zip
+        shell: pwsh
+        run: |
+          if ("${{ inputs.skip_tests }}" -eq "true") {
+            powershell -ExecutionPolicy Bypass -File .\scripts\build-releases.ps1 -SkipTests
+          } else {
+            powershell -ExecutionPolicy Bypass -File .\scripts\build-releases.ps1
+          }
+
+      - name: Subir artefactos descargables (.exe, .zip y SHA256SUMS.txt)
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiskVaultClean-Windows-x64
+          path: |
+            release/DiskVaultClean_v*_Setup_x64.exe
+            release/DiskVaultClean_v*_Portable_x64.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publicar GitHub Release automático (si se subió un tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: DiskVault Clean ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release/DiskVaultClean_v*_Setup_x64.exe
+            release/DiskVaultClean_v*_Portable_x64.zip
+            release/SHA256SUMS.txt
