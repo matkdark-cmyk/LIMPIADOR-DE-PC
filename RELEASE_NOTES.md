@@ -1,11 +1,11 @@
-## Novedades de DiskVault Clean v1.3.1
+## Novedades de DiskVault Clean v1.3.2
 
-- **Corrección definitiva del auto-actualizador y reinicio automático**:
-  - Ahora la actualización instala directamente en la misma carpeta y alcance exacto de tu instalación (`/ALLUSERS` o `/CURRENTUSER` + `/D=`) solicitando permisos UAC antes de cerrar la app solo cuando es necesario.
-  - Verifica automáticamente que el ejecutable quedó actualizado a la última versión (sincronizando accesos directos si existían dos carpetas) y relanza la nueva ventana automáticamente sin quedar cerrado ni caer en bucles de actualización.
-  - Guarda un registro local en `updater.log` para diagnóstico y limpia archivos temporales `.old` al iniciar.
-- **Modo Administrador siempre activo por defecto**: DiskVault Clean inicia automáticamente en **Modo Administrador** en cada sesión hasta que decidas desactivarlo manualmente desde la barra superior o desde Ajustes.
+- **Nuevo auto-actualizador 100% nativo en Rust (cero PowerShell)**:
+  - Se eliminó completamente la dependencia de scripts PowerShell temporales (que Windows Defender o antivirus podían bloquear silenciosamente dejando la app cerrada sin actualizar).
+  - Ahora el propio binario nativo descarga con barra de progreso visible (`0% -> 100%`), verifica la firma SHA-256, instala en la ruta exacta de tu acceso directo (con respaldo automático directo si el instalador NSIS falla) y abre automáticamente la ventana nueva ya en la última versión.
+  - Ejecución en hilos del sistema independientes de Tokio para evitar cierres inesperados al iniciar la descarga.
+- **Modo Administrador siempre activo por defecto**: inicia automáticamente con privilegios de Administrador en cada sesión hasta que decidas desactivarlo manualmente.
 - **Escaneo antivirus y Paso 2 (`xxHash3`) bajo tu control en Mover al NAS**:
-  - Si eliges **No escanear (salta Paso 2 xxHash3)**, copia todo directamente sin escaneo ni verificación xxHash3.
-  - Si se detecta una amenaza o una advertencia en el Paso 2 (`xxHash3`), te vuelve a consultar si deseas **ignorar la advertencia y seguir con el proceso** o **aceptar la advertencia y detenerte hasta ahí**.
+  - Al elegir **No escanear (salta Paso 2 xxHash3)** copia todo directamente sin escaneo ni verificación xxHash3.
+  - Ante cualquier amenaza o advertencia del Paso 2 (`xxHash3`), te vuelve a consultar si deseas **ignorar la advertencia y seguir con el proceso** o **aceptar la advertencia y detenerlo hasta ahí**.
 - **Colores nativos de Windows y Modo Oscuro**: sincronización automática con el tema Claro/Oscuro y el color de énfasis real de Windows.

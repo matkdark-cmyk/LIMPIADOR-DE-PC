@@ -1058,7 +1058,7 @@ export function SettingsView() {
           <div className="space-y-1">
             <p className="text-xs text-slate-500 dark:text-slate-400">Versión de DiskVault Clean</p>
             <p className="font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
-              v{appStatus?.appVersion ?? '1.3.1'}
+              v{appStatus?.appVersion ?? '1.3.2'}
             </p>
           </div>
 

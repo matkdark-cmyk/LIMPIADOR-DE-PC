@@ -169,6 +169,8 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
         assetName: updateInfo.assetName,
         checksumsUrl: updateInfo.checksumsUrl,
         isPortablePackage: updateInfo.isPortablePackage,
+        portableFallbackUrl: updateInfo.portableFallbackUrl ?? null,
+        portableFallbackName: updateInfo.portableFallbackName ?? null,
       });
       // Si la actualización tuvo éxito en Windows, el backend cierra la instancia actual
       // y relanza la nueva ventana automáticamente.

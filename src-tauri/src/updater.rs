@@ -3,14 +3,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
 use url::Url;
 
 /// Repositorio oficial de GitHub Releases para DiskVault Clean.
 pub const GITHUB_REPO_OWNER: &str = "matkdark-cmyk";
 pub const GITHUB_REPO_NAME: &str = "LIMPIADOR-DE-PC";
+
+/// Bandera CLI interna para el modo asistente nativo de actualización (sin PowerShell).
+pub const APPLY_UPDATE_FLAG: &str = "--apply-update";
 
 const USER_AGENT: &str = concat!("DiskVaultClean/", env!("CARGO_PKG_VERSION"));
 
@@ -40,6 +43,8 @@ pub struct UpdateCheckResult {
     pub asset_size_bytes: u64,
     pub checksums_url: Option<String>,
     pub is_portable_package: bool,
+    pub portable_fallback_url: Option<String>,
+    pub portable_fallback_name: Option<String>,
 }
 
 /// Evento de progreso emitido al frontend durante la descarga e instalación (`"update-progress"`).
@@ -62,6 +67,10 @@ pub struct InstallUpdateRequest {
     pub asset_name: String,
     pub checksums_url: Option<String>,
     pub is_portable_package: bool,
+    #[serde(default)]
+    pub portable_fallback_url: Option<String>,
+    #[serde(default)]
+    pub portable_fallback_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +89,38 @@ struct GitHubAsset {
     name: String,
     size: u64,
     browser_download_url: String,
+}
+
+/// Configuración persistida en JSON para el proceso auxiliar nativo `DiskVaultUpdater.exe`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeUpdateConfig {
+    old_pid: u32,
+    payload_path: String,
+    staging_dir: String,
+    current_exe: String,
+    app_dir: String,
+    is_portable: bool,
+    target_version: String,
+    log_path: String,
+    checksums_url: Option<String>,
+    portable_fallback_url: Option<String>,
+    portable_fallback_name: Option<String>,
+}
+
+/// Detecta si el proceso fue invocado en modo asistente nativo `--apply-update <ruta_json>`.
+pub fn parse_apply_update_arg() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == APPLY_UPDATE_FLAG {
+            if let Some(path) = args.next() {
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Parsea una versión semántica simple (`v1.2.3` o `1.2.3-beta` -> `(1, 2, 3)`).
@@ -170,176 +211,39 @@ fn build_http_client(timeout_secs: u64) -> Result<Client, String> {
         .map_err(|err| format!("No se pudo inicializar el cliente HTTPS de actualizaciones: {err}"))
 }
 
-/// Consulta la última versión publicada en GitHub Releases sin descargar binarios.
-/// Si `/releases/latest` devuelve 404, consulta `/releases?per_page=10` como respaldo.
-pub fn check_github_updates(is_portable: bool) -> Result<UpdateCheckResult, String> {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let latest_api_url = format!(
-        "https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
-    );
-    validate_update_url(&latest_api_url)?;
-
-    let client = build_http_client(20)?;
-    let response = client
-        .get(&latest_api_url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .map_err(|err| {
-            format!("No se pudo contactar con GitHub para buscar actualizaciones: {err}")
-        })?;
-
-    let release_opt: Option<GitHubRelease> = if response.status().is_success() {
-        let parsed: GitHubRelease = response
-            .json()
-            .map_err(|err| format!("No se pudo interpretar la respuesta de GitHub Releases: {err}"))?;
-        if parsed.draft.unwrap_or(false) {
-            None
-        } else {
-            Some(parsed)
+fn compute_file_sha256(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
         }
-    } else if response.status().as_u16() == 404 {
-        // Respaldo: listar releases publicados por si ninguno está marcado como "latest"
-        let list_url = format!(
-            "https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases?per_page=10"
-        );
-        validate_update_url(&list_url)?;
-        let list_resp = client
-            .get(&list_url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .map_err(|err| {
-                format!("No se pudo consultar la lista de versiones en GitHub: {err}")
-            })?;
-
-        if list_resp.status().is_success() {
-            let releases: Vec<GitHubRelease> = list_resp.json().unwrap_or_default();
-            releases
-                .into_iter()
-                .filter(|r| !r.draft.unwrap_or(false))
-                .max_by_key(|r| parse_semver(&r.tag_name).unwrap_or((0, 0, 0)))
-        } else {
-            None
-        }
-    } else {
-        return Err(format!(
-            "GitHub respondió con estado HTTP {} al comprobar actualizaciones.",
-            response.status().as_u16()
-        ));
-    };
-
-    let Some(release) = release_opt else {
-        return Ok(UpdateCheckResult {
-            update_available: false,
-            current_version: current_version.clone(),
-            latest_version: current_version,
-            release_title: "Sin publicaciones disponibles todavía".to_string(),
-            release_notes: String::new(),
-            published_at: None,
-            release_url: format!(
-                "https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases"
-            ),
-            download_url: None,
-            asset_name: None,
-            asset_size_bytes: 0,
-            checksums_url: None,
-            is_portable_package: is_portable,
-        });
-    };
-
-    let latest_version = release
-        .tag_name
-        .trim()
-        .trim_start_matches(['v', 'V'])
-        .to_string();
-
-    // Elegir el artefacto adecuado según el modo activo (Portable .zip o Instalador NSIS .exe)
-    let matched_asset = if is_portable {
-        release.assets.iter().find(|a| {
-            let lower = a.name.to_ascii_lowercase();
-            lower.ends_with(".zip") && lower.contains("portable")
-        })
-    } else {
-        release.assets.iter().find(|a| {
-            let lower = a.name.to_ascii_lowercase();
-            lower.ends_with(".exe") && (lower.contains("setup") || lower.contains("diskvault"))
-        })
-    };
-
-    let checksums_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name.eq_ignore_ascii_case("SHA256SUMS.txt"));
-
-    let update_available =
-        is_newer_version(&current_version, &latest_version) && matched_asset.is_some();
-
-    let notes = release
-        .body
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    let release_title = release
-        .name
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| format!("DiskVault Clean v{latest_version}"));
-
-    Ok(UpdateCheckResult {
-        update_available,
-        current_version,
-        latest_version,
-        release_title,
-        release_notes: if notes.is_empty() {
-            "Esta actualización incluye mejoras de estabilidad, seguridad y rendimiento para DiskVault Clean."
-                .to_string()
-        } else {
-            notes
-        },
-        published_at: release.published_at,
-        release_url: release.html_url,
-        download_url: matched_asset.map(|a| a.browser_download_url.clone()),
-        asset_name: matched_asset.map(|a| a.name.clone()),
-        asset_size_bytes: matched_asset.map(|a| a.size).unwrap_or(0),
-        checksums_url: checksums_asset.map(|a| a.browser_download_url.clone()),
-        is_portable_package: is_portable,
-    })
+        hasher.update(&buf[..n]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }
 
-fn emit_update_progress(
-    app_handle: &AppHandle,
-    stage: &str,
-    downloaded_bytes: u64,
-    total_bytes: u64,
-    message: &str,
-) {
-    let percent = if total_bytes > 0 {
-        ((downloaded_bytes as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
-    };
-
-    let _ = app_handle.emit(
-        "update-progress",
-        UpdateProgressEvent {
-            stage: stage.to_string(),
-            downloaded_bytes,
-            total_bytes,
-            percent,
-            message: message.to_string(),
-        },
-    );
-}
-
-/// Elimina archivos temporales `.old` dejados por una sustitución en caliente del ejecutable.
+/// Elimina archivos `.old` y carpetas temporales antiguas `DiskVaultClean_Update_*` al iniciar la app.
 pub fn cleanup_old_update_artifacts() {
     if let Ok(exe_path) = std::env::current_exe() {
         let mut old_os = exe_path.as_os_str().to_os_string();
         old_os.push(".old");
-        let old_path = std::path::PathBuf::from(old_os);
+        let old_path = PathBuf::from(old_os);
         if old_path.exists() {
             let _ = fs::remove_file(&old_path);
+        }
+    }
+
+    let temp_dir = std::env::temp_dir();
+    if let Ok(entries) = fs::read_dir(&temp_dir) {
+        let my_prefix = format!("DiskVaultClean_Update_{}", std::process::id());
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("DiskVaultClean_Update_") && name != my_prefix {
+                let _ = fs::remove_dir_all(entry.path());
+            }
         }
     }
 }
@@ -389,8 +293,285 @@ pub fn build_nsis_install_args(mode_flag: &str, scope_flag: &str, app_dir: &str)
     }
 }
 
-/// Descarga el paquete confirmado, verifica su SHA-256 si `SHA256SUMS.txt` está presente,
-/// lanza el actualizador desacoplado en Windows y cierra la instancia actual para reiniciarse.
+/// Consulta la última versión publicada en GitHub Releases sin descargar binarios.
+/// Si `/releases/latest` devuelve 404, consulta `/releases?per_page=10` como respaldo.
+pub fn check_github_updates(is_portable: bool) -> Result<UpdateCheckResult, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let latest_api_url = format!(
+        "https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
+    );
+    validate_update_url(&latest_api_url)?;
+
+    let client = build_http_client(20)?;
+    let response = client
+        .get(&latest_api_url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .map_err(|err| {
+            format!("No se pudo contactar con GitHub para buscar actualizaciones: {err}")
+        })?;
+
+    let release_opt: Option<GitHubRelease> = if response.status().is_success() {
+        let parsed: GitHubRelease = response
+            .json()
+            .map_err(|err| format!("No se pudo interpretar la respuesta de GitHub Releases: {err}"))?;
+        if parsed.draft.unwrap_or(false) {
+            None
+        } else {
+            Some(parsed)
+        }
+    } else if response.status().as_u16() == 404 {
+        let list_url = format!(
+            "https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases?per_page=10"
+        );
+        validate_update_url(&list_url)?;
+        let list_resp = client
+            .get(&list_url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .map_err(|err| {
+                format!("No se pudo consultar la lista de versiones en GitHub: {err}")
+            })?;
+
+        if list_resp.status().is_success() {
+            let releases: Vec<GitHubRelease> = list_resp.json().unwrap_or_default();
+            releases
+                .into_iter()
+                .filter(|r| !r.draft.unwrap_or(false))
+                .max_by_key(|r| parse_semver(&r.tag_name).unwrap_or((0, 0, 0)))
+        } else {
+            None
+        }
+    } else {
+        return Err(format!(
+            "GitHub respondió con estado HTTP {} al comprobar actualizaciones.",
+            response.status().as_u16()
+        ));
+    };
+
+    let Some(release) = release_opt else {
+        return Ok(UpdateCheckResult {
+            update_available: false,
+            current_version: current_version.clone(),
+            latest_version: current_version,
+            release_title: "Sin publicaciones disponibles todavía".to_string(),
+            release_notes: String::new(),
+            published_at: None,
+            release_url: format!(
+                "https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases"
+            ),
+            download_url: None,
+            asset_name: None,
+            asset_size_bytes: 0,
+            checksums_url: None,
+            is_portable_package: is_portable,
+            portable_fallback_url: None,
+            portable_fallback_name: None,
+        });
+    };
+
+    let latest_version = release
+        .tag_name
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .to_string();
+
+    let portable_asset = release.assets.iter().find(|a| {
+        let lower = a.name.to_ascii_lowercase();
+        lower.ends_with(".zip") && lower.contains("portable")
+    });
+
+    let installer_asset = release.assets.iter().find(|a| {
+        let lower = a.name.to_ascii_lowercase();
+        lower.ends_with(".exe") && (lower.contains("setup") || lower.contains("diskvault"))
+    });
+
+    let matched_asset = if is_portable {
+        portable_asset
+    } else {
+        installer_asset.or(portable_asset)
+    };
+
+    let checksums_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case("SHA256SUMS.txt"));
+
+    let update_available =
+        is_newer_version(&current_version, &latest_version) && matched_asset.is_some();
+
+    let notes = release.body.unwrap_or_default().trim().to_string();
+
+    let release_title = release
+        .name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("DiskVault Clean v{latest_version}"));
+
+    Ok(UpdateCheckResult {
+        update_available,
+        current_version,
+        latest_version,
+        release_title,
+        release_notes: if notes.is_empty() {
+            "Esta actualización incluye mejoras de estabilidad, seguridad y rendimiento para DiskVault Clean."
+                .to_string()
+        } else {
+            notes
+        },
+        published_at: release.published_at,
+        release_url: release.html_url,
+        download_url: matched_asset.map(|a| a.browser_download_url.clone()),
+        asset_name: matched_asset.map(|a| a.name.clone()),
+        asset_size_bytes: matched_asset.map(|a| a.size).unwrap_or(0),
+        checksums_url: checksums_asset.map(|a| a.browser_download_url.clone()),
+        is_portable_package: is_portable,
+        portable_fallback_url: portable_asset.map(|a| a.browser_download_url.clone()),
+        portable_fallback_name: portable_asset.map(|a| a.name.clone()),
+    })
+}
+
+fn emit_update_progress(
+    app_handle: &AppHandle,
+    stage: &str,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    message: &str,
+) {
+    let percent = if total_bytes > 0 {
+        ((downloaded_bytes as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
+    let _ = app_handle.emit(
+        "update-progress",
+        UpdateProgressEvent {
+            stage: stage.to_string(),
+            downloaded_bytes,
+            total_bytes,
+            percent,
+            message: message.to_string(),
+        },
+    );
+}
+
+fn download_verified_file(
+    client: &Client,
+    download_url: &str,
+    asset_name: &str,
+    dest_path: &Path,
+    checksums_url: Option<&str>,
+    app_handle: Option<&AppHandle>,
+) -> Result<u64, String> {
+    validate_update_url(download_url)?;
+    if let Some(cs_url) = checksums_url {
+        validate_update_url(cs_url)?;
+    }
+
+    let mut response = client
+        .get(download_url)
+        .send()
+        .map_err(|err| format!("Error al descargar la actualización: {err}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "No se pudo descargar el paquete (HTTP {}).",
+            response.status().as_u16()
+        ));
+    }
+
+    // Verificar destino final tras redirecciones de GitHub CDN
+    validate_update_url(response.url().as_str())?;
+
+    let total_bytes = response.content_length().unwrap_or(0);
+    let mut out_file = File::create(dest_path)
+        .map_err(|err| format!("No se pudo crear el archivo temporal de descarga: {err}"))?;
+
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 128 * 1024];
+    let mut downloaded: u64 = 0;
+    let mut last_emit = Instant::now();
+    let mut emitted_first_chunk = false;
+
+    loop {
+        let read_n = response
+            .read(&mut buffer)
+            .map_err(|err| format!("Se interrumpió la descarga de la actualización: {err}"))?;
+        if read_n == 0 {
+            break;
+        }
+        let chunk = &buffer[..read_n];
+        out_file
+            .write_all(chunk)
+            .map_err(|err| format!("No se pudo escribir el archivo de actualización: {err}"))?;
+        hasher.update(chunk);
+        downloaded = downloaded.saturating_add(read_n as u64);
+
+        if let Some(handle) = app_handle {
+            if !emitted_first_chunk || last_emit.elapsed() >= Duration::from_millis(60) {
+                emit_update_progress(
+                    handle,
+                    "downloading",
+                    downloaded,
+                    total_bytes,
+                    &format!("Descargando {asset_name}..."),
+                );
+                emitted_first_chunk = true;
+                last_emit = Instant::now();
+            }
+        }
+    }
+
+    out_file
+        .flush()
+        .map_err(|err| format!("No se pudo completar la escritura del paquete: {err}"))?;
+    drop(out_file);
+
+    if downloaded == 0 || (total_bytes > 0 && downloaded != total_bytes) {
+        let _ = fs::remove_file(dest_path);
+        return Err(
+            "La descarga quedó incompleta. Comprueba tu conexión e inténtalo de nuevo.".to_string(),
+        );
+    }
+
+    if let Some(handle) = app_handle {
+        emit_update_progress(
+            handle,
+            "verifying",
+            downloaded,
+            total_bytes.max(downloaded),
+            "Descarga completada (100%). Verificando firma SHA-256...",
+        );
+    }
+
+    // Verificar hash SHA-256 si el Release publicó SHA256SUMS.txt
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if let Some(cs_url) = checksums_url {
+        if let Ok(cs_resp) = client.get(cs_url).send() {
+            if cs_resp.status().is_success() {
+                if let Ok(cs_text) = cs_resp.text() {
+                    if let Some(expected_hash) = extract_expected_sha256(&cs_text, asset_name) {
+                        if expected_hash != actual_hash {
+                            let _ = fs::remove_file(dest_path);
+                            return Err(
+                                "La verificación de integridad SHA-256 falló: el archivo descargado no coincide con la firma oficial del Release. Se canceló la instalación por seguridad."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(downloaded)
+}
+
+/// Descarga el paquete confirmado, verifica su SHA-256, lanza una copia nativa
+/// del propio ejecutable (`DiskVaultUpdater.exe --apply-update ...`, CERO PowerShell)
+/// y cierra la instancia actual para reiniciarse en la última versión.
 pub fn download_and_apply_update(
     app_handle: &AppHandle,
     req: &InstallUpdateRequest,
@@ -402,10 +583,13 @@ pub fn download_and_apply_update(
     if let Some(ref cs_url) = req.checksums_url {
         validate_update_url(cs_url)?;
     }
+    if let Some(ref fallback_url) = req.portable_fallback_url {
+        validate_update_url(fallback_url)?;
+    }
 
     let client = build_http_client(300)?;
 
-    // 1. Descargar paquete en carpeta temporal aislada
+    // 1. Preparar carpeta temporal aislada
     let staging_dir = std::env::temp_dir().join(format!(
         "DiskVaultClean_Update_{}",
         std::process::id()
@@ -424,124 +608,39 @@ pub fn download_and_apply_update(
         &format!("Conectando con GitHub para descargar v{}...", req.version),
     );
 
-    let mut response = client
-        .get(&req.download_url)
-        .send()
-        .map_err(|err| format!("Error al descargar la actualización: {err}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "No se pudo descargar el paquete (HTTP {}).",
-            response.status().as_u16()
-        ));
-    }
-
-    // Verificar destino final tras posibles redirecciones de GitHub
-    validate_update_url(response.url().as_str())?;
-
-    let total_bytes = response.content_length().unwrap_or(0);
-    let mut out_file = File::create(&payload_path)
-        .map_err(|err| format!("No se pudo crear el archivo temporal de descarga: {err}"))?;
-
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 256 * 1024];
-    let mut downloaded: u64 = 0;
-    let mut last_emit = Instant::now();
-
-    loop {
-        let read_n = response
-            .read(&mut buffer)
-            .map_err(|err| format!("Se interrumpió la descarga de la actualización: {err}"))?;
-        if read_n == 0 {
-            break;
-        }
-        let chunk = &buffer[..read_n];
-        out_file
-            .write_all(chunk)
-            .map_err(|err| format!("No se pudo escribir el archivo de actualización: {err}"))?;
-        hasher.update(chunk);
-        downloaded = downloaded.saturating_add(read_n as u64);
-
-        if last_emit.elapsed() >= Duration::from_millis(120) {
-            emit_update_progress(
-                app_handle,
-                "downloading",
-                downloaded,
-                total_bytes,
-                &format!("Descargando {}...", safe_filename),
-            );
-            last_emit = Instant::now();
-        }
-    }
-
-    out_file
-        .flush()
-        .map_err(|err| format!("No se pudo completar la escritura del paquete: {err}"))?;
-    drop(out_file);
-
-    emit_update_progress(
-        app_handle,
-        "verifying",
-        downloaded,
-        total_bytes.max(downloaded),
-        "Verificando integridad SHA-256 del paquete descargado...",
-    );
-
-    // 2. Verificar hash SHA-256 si el Release publicó SHA256SUMS.txt
-    let actual_hash = format!("{:x}", hasher.finalize());
-    if let Some(ref cs_url) = req.checksums_url {
-        if let Ok(cs_resp) = client.get(cs_url).send() {
-            if cs_resp.status().is_success() {
-                if let Ok(cs_text) = cs_resp.text() {
-                    if let Some(expected_hash) = extract_expected_sha256(&cs_text, &safe_filename) {
-                        if expected_hash != actual_hash {
-                            let _ = fs::remove_dir_all(&staging_dir);
-                            return Err(
-                                "La verificación de integridad SHA-256 falló: el archivo descargado no coincide con la firma oficial del Release. Se canceló la instalación por seguridad."
-                                    .to_string(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let downloaded = download_verified_file(
+        &client,
+        &req.download_url,
+        &safe_filename,
+        &payload_path,
+        req.checksums_url.as_deref(),
+        Some(app_handle),
+    )?;
 
     emit_update_progress(
         app_handle,
         "installing",
         downloaded,
-        total_bytes.max(downloaded),
-        "Instalando actualización y reiniciando DiskVault Clean...",
+        downloaded,
+        &format!(
+            "Descarga verificada. Instalando v{} y reiniciando automáticamente...",
+            req.version
+        ),
     );
 
-    // 3. Lanzar asistente desacoplado de actualización + reinicio automático en Windows
-    launch_windows_self_updater(
+    // 2. Lanzar el actualizador nativo en Rust (cero PowerShell, cero scripts bloqueados por AV)
+    launch_windows_native_updater(
         &payload_path,
         &staging_dir,
         is_portable,
-        &req.version,
+        req,
         logs_dir,
     )?;
 
-    // 4. Breve pausa para asegurar que la UI reciba el evento y el asistente arranque antes de cerrar
-    std::thread::sleep(Duration::from_millis(350));
+    // 3. Dar tiempo visible a la UI para mostrar 100% y asegurar que el helper ya está esperando
+    std::thread::sleep(Duration::from_millis(800));
     app_handle.exit(0);
     Ok(())
-}
-
-#[cfg(windows)]
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateHelperConfig {
-    old_pid: u32,
-    payload_path: String,
-    staging_dir: String,
-    current_exe: String,
-    app_dir: String,
-    is_portable: bool,
-    target_version: String,
-    log_path: String,
 }
 
 #[cfg(windows)]
@@ -557,71 +656,67 @@ fn can_write_to_dir(dir: &Path) -> bool {
 }
 
 #[cfg(windows)]
-fn spawn_elevated_updater_powershell(script_path: &Path, config_path: &Path) -> Result<(), String> {
+fn shell_execute_windows(
+    verb: &str,
+    exe_path: &Path,
+    params: Option<&str>,
+    work_dir: Option<&Path>,
+    show_window: bool,
+) -> Result<(), (isize, u32)> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{GetLastError, ERROR_CANCELLED, HWND};
+    use windows::Win32::Foundation::{GetLastError, HWND};
     use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
-    let params = format!(
-        "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" -ConfigPath \"{}\"",
-        script_path.display(),
-        config_path.display()
-    );
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
     let to_wide = |value: &OsStr| -> Vec<u16> {
         value.encode_wide().chain(std::iter::once(0)).collect()
     };
 
-    let verb_wide = to_wide(OsStr::new("runas"));
-    let exe_wide = to_wide(OsStr::new("powershell.exe"));
-    let params_wide = to_wide(OsStr::new(&params));
+    let verb_w = to_wide(OsStr::new(verb));
+    let exe_w = to_wide(exe_path.as_os_str());
+    let params_w = params.map(|p| to_wide(OsStr::new(p)));
+    let dir_w = work_dir.map(|d| to_wide(d.as_os_str()));
+
+    let show_cmd = if show_window { SW_SHOWNORMAL } else { SW_HIDE };
 
     let result = unsafe {
         ShellExecuteW(
             HWND::default(),
-            PCWSTR(verb_wide.as_ptr()),
-            PCWSTR(exe_wide.as_ptr()),
-            PCWSTR(params_wide.as_ptr()),
-            PCWSTR::null(),
-            SW_HIDE,
+            PCWSTR(verb_w.as_ptr()),
+            PCWSTR(exe_w.as_ptr()),
+            params_w
+                .as_ref()
+                .map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr())),
+            dir_w
+                .as_ref()
+                .map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr())),
+            show_cmd,
         )
     };
 
     let code = result.0 as isize;
     if code > 32 {
-        return Ok(());
+        Ok(())
+    } else {
+        let err = unsafe { GetLastError() };
+        Err((code, err.0))
     }
-
-    let last_error = unsafe { GetLastError() };
-    if last_error == ERROR_CANCELLED || code == 5 {
-        return Err(
-            "Se canceló el permiso de Administrador (UAC) necesario para actualizar la carpeta de instalación. No se cerró la aplicación."
-                .to_string(),
-        );
-    }
-
-    Err(format!(
-        "No se pudo iniciar el asistente elevado de actualización (código {}, detalle {}).",
-        code, last_error.0
-    ))
 }
 
 #[cfg(windows)]
-fn launch_windows_self_updater(
+fn launch_windows_native_updater(
     payload_path: &Path,
     staging_dir: &Path,
     is_portable: bool,
-    target_version: &str,
+    req: &InstallUpdateRequest,
     logs_dir: &Path,
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
+    use windows::Win32::Foundation::ERROR_CANCELLED;
 
-    // IMPORTANTE: En Win32 NO se deben combinar CREATE_NO_WINDOW y DETACHED_PROCESS.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
     let current_exe = std::env::current_exe().map_err(|err| {
@@ -634,384 +729,527 @@ fn launch_windows_self_updater(
     let _ = fs::create_dir_all(logs_dir);
     let log_path = logs_dir.join("updater.log");
 
-    // Guardar todos los parámetros en JSON UTF-8 para sobrevivir incluso cruces UAC ("runas")
+    // Copiar nuestro propio ejecutable nativo a la carpeta temporal para que pueda reemplazar
+    // al original sin bloqueos de archivo y SIN depender de PowerShell ni scripts .ps1/.bat.
+    let helper_exe = staging_dir.join("DiskVaultUpdater.exe");
+    fs::copy(&current_exe, &helper_exe).map_err(|err| {
+        format!("No se pudo preparar el ejecutable auxiliar de actualización: {err}")
+    })?;
+
     let config_path = staging_dir.join("update_config.json");
-    let config = UpdateHelperConfig {
+    let config = NativeUpdateConfig {
         old_pid: std::process::id(),
         payload_path: payload_path.to_string_lossy().to_string(),
         staging_dir: staging_dir.to_string_lossy().to_string(),
         current_exe: current_exe.to_string_lossy().to_string(),
         app_dir: app_dir.to_string_lossy().to_string(),
         is_portable,
-        target_version: target_version.trim().trim_start_matches(['v', 'V']).to_string(),
+        target_version: req.version.trim().trim_start_matches(['v', 'V']).to_string(),
         log_path: log_path.to_string_lossy().to_string(),
+        checksums_url: req.checksums_url.clone(),
+        portable_fallback_url: req.portable_fallback_url.clone(),
+        portable_fallback_name: req.portable_fallback_name.clone(),
     };
+
     let config_json = serde_json::to_string_pretty(&config)
         .map_err(|err| format!("No se pudo serializar la configuración de actualización: {err}"))?;
     fs::write(&config_path, config_json.as_bytes())
         .map_err(|err| format!("No se pudo guardar la configuración de actualización: {err}"))?;
 
-    // Script PowerShell puro ASCII guardado con BOM UTF-8 para máxima compatibilidad con PowerShell 5.1
-    let script_path = staging_dir.join("apply_update.ps1");
-    let ps_script = r#"param(
-    [Parameter(Mandatory = $true)]
-    [string]$ConfigPath
-)
-
-$ErrorActionPreference = 'Continue'
-
-$cfg = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$oldPid = [int]$cfg.oldPid
-$payload = [string]$cfg.payloadPath
-$stagingDir = [string]$cfg.stagingDir
-$currentExe = [string]$cfg.currentExe
-$appDir = [string]$cfg.appDir
-$appDirClean = $appDir.TrimEnd('\', '/')
-$isPortable = [bool]$cfg.isPortable
-$targetVer = [string]$cfg.targetVersion
-$logPath = [string]$cfg.logPath
-
-function Write-Log {
-    param([string]$Message)
-    try {
-        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        Add-Content -LiteralPath $logPath -Value "[$ts] $Message" -Encoding UTF8
-    } catch {}
-}
-
-function Get-SafeHash {
-    param([string]$Path)
-    try {
-        if (Test-Path -LiteralPath $Path) {
-            return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-        }
-    } catch {}
-    return ''
-}
-
-function Get-ExeVersion {
-    param([string]$Path)
-    try {
-        if (Test-Path -LiteralPath $Path) {
-            $vi = (Get-Item -LiteralPath $Path).VersionInfo
-            if ($vi -and $vi.ProductVersion) { return ([string]$vi.ProductVersion).Trim() }
-            if ($vi -and $vi.FileVersion) { return ([string]$vi.FileVersion).Trim() }
-        }
-    } catch {}
-    return ''
-}
-
-function Test-ExeMatchesTarget {
-    param([string]$ExePath, [string]$OldHash)
-    if (-not (Test-Path -LiteralPath $ExePath)) { return $false }
-    $ver = Get-ExeVersion -Path $ExePath
-    if ($targetVer -and $ver -and $ver.StartsWith($targetVer)) {
-        return $true
-    }
-    $newHash = Get-SafeHash -Path $ExePath
-    if ($OldHash -and $newHash -and ($newHash -ne $OldHash)) {
-        return $true
-    }
-    return $false
-}
-
-function Replace-ExeFile {
-    param([string]$SourceExe, [string]$DestExe)
-    $srcHash = Get-SafeHash -Path $SourceExe
-    for ($attempt = 1; $attempt -le 15; $attempt++) {
-        try {
-            Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force -ErrorAction Stop
-            $dstHash = Get-SafeHash -Path $DestExe
-            if (-not $srcHash -or $dstHash -eq $srcHash) {
-                return $true
-            }
-        } catch {
-            try {
-                $oldBackup = "$DestExe.old"
-                if (Test-Path -LiteralPath $oldBackup) {
-                    Remove-Item -LiteralPath $oldBackup -Force -ErrorAction SilentlyContinue
-                }
-                if (Test-Path -LiteralPath $DestExe) {
-                    Move-Item -LiteralPath $DestExe -Destination $oldBackup -Force -ErrorAction Stop
-                }
-                Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force -ErrorAction Stop
-                return $true
-            } catch {
-                Start-Sleep -Milliseconds 400
-            }
-        }
-    }
-    return $false
-}
-
-function Find-UpdatedExecutable {
-    param([string]$OldHash)
-    if (Test-ExeMatchesTarget -ExePath $currentExe -OldHash $OldHash) {
-        return $currentExe
-    }
-
-    $dirs = @(
-        $appDirClean,
-        (Join-Path $env:LOCALAPPDATA 'DiskVault Clean'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\DiskVault Clean'),
-        (Join-Path $env:ProgramFiles 'DiskVault Clean')
-    )
-    if (${env:ProgramFiles(x86)}) {
-        $dirs += (Join-Path ${env:ProgramFiles(x86)} 'DiskVault Clean')
-    }
-
-    $exeNames = @(
-        (Split-Path -Leaf $currentExe),
-        'diskvault-clean.exe',
-        'DiskVault Clean.exe',
-        'DiskVaultClean.exe'
-    )
-
-    foreach ($d in ($dirs | Select-Object -Unique)) {
-        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
-        foreach ($n in ($exeNames | Select-Object -Unique)) {
-            $cand = Join-Path $d $n
-            if (Test-Path -LiteralPath $cand) {
-                $ver = Get-ExeVersion -Path $cand
-                if ($targetVer -and $ver -and $ver.StartsWith($targetVer)) {
-                    return $cand
-                }
-            }
-        }
-    }
-
-    foreach ($d in ($dirs | Select-Object -Unique)) {
-        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
-        foreach ($n in ($exeNames | Select-Object -Unique)) {
-            $cand = Join-Path $d $n
-            if (Test-ExeMatchesTarget -ExePath $cand -OldHash $OldHash) {
-                return $cand
-            }
-        }
-    }
-
-    return $null
-}
-
-Write-Log "=== Starting DiskVault Clean auto-update to v$targetVer (portable=$isPortable) ==="
-Write-Log "CurrentExe: $currentExe | Payload: $payload"
-
-$oldHash = Get-SafeHash -Path $currentExe
-Write-Log "OldExeHash: $oldHash"
-
-# 1. Esperar a que termine la instancia anterior y liberar bloqueos de archivo
-for ($w = 0; $w -lt 24; $w++) {
-    $p = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-    if (-not $p) { break }
-    Start-Sleep -Milliseconds 250
-}
-$stillRunning = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-if ($stillRunning) {
-    Write-Log "Force stopping old PID $oldPid"
-    Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 800
-}
-
-# Cerrar cualquier otra instancia que este ejecutando exactamente el mismo binario
-try {
-    $normCurrent = $currentExe.ToLowerInvariant()
-    Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.Id -ne $PID -and $_.Path -and $_.Path.ToLowerInvariant() -eq $normCurrent
-    } | ForEach-Object {
-        Write-Log "Stopping sibling process PID $($_.Id)"
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
-} catch {}
-
-Start-Sleep -Milliseconds 900
-
-$launchExe = $currentExe
-
-if ($isPortable) {
-    $extractDir = Join-Path $stagingDir 'extracted'
-    if (Test-Path -LiteralPath $extractDir) {
-        Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    Expand-Archive -LiteralPath $payload -DestinationPath $extractDir -Force
-
-    $newExe = Get-ChildItem -Path $extractDir -Filter '*.exe' -File -Recurse |
-        Sort-Object Length -Descending |
-        Select-Object -First 1
-
-    if ($newExe) {
-        $ok = Replace-ExeFile -SourceExe $newExe.FullName -DestExe $currentExe
-        Write-Log "Portable binary replace result: $ok"
-    }
-
-    $readmeSrc = Join-Path $extractDir 'LEEME_PORTABLE.txt'
-    if (Test-Path -LiteralPath $readmeSrc) {
-        Copy-Item -LiteralPath $readmeSrc -Destination (Join-Path $appDirClean 'LEEME_PORTABLE.txt') -Force -ErrorAction SilentlyContinue
-    }
-} else {
-    $pf1 = if ($env:ProgramFiles) { $env:ProgramFiles.TrimEnd('\').ToLowerInvariant() } else { '' }
-    $pf2 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)}.TrimEnd('\').ToLowerInvariant() } else { '' }
-    $appLower = $appDirClean.ToLowerInvariant()
-
-    $isMachineInstall = ($pf1 -and $appLower.StartsWith($pf1)) -or ($pf2 -and $appLower.StartsWith($pf2))
-    $scopeFlag = if ($isMachineInstall) { '/ALLUSERS' } else { '/CURRENTUSER' }
-
-    # Intento 1: Instalacion silenciosa exacta en el mismo alcance y carpeta (/D= SIEMPRE al final y sin comillas)
-    $silentArgs = "/S $scopeFlag /D=$appDirClean"
-    Write-Log "Attempt 1 (NSIS silent): $silentArgs"
-    try {
-        $p1 = Start-Process -FilePath $payload -ArgumentList $silentArgs -Wait -PassThru
-        Write-Log "Attempt 1 exit code: $($p1.ExitCode)"
-    } catch {
-        Write-Log "Attempt 1 exception: $($_.Exception.Message)"
-    }
-    Start-Sleep -Milliseconds 1000
-
-    $updatedExe = Find-UpdatedExecutable -OldHash $oldHash
-
-    # Intento 2: Modo pasivo automatico (/P) si el modo silencioso /S no actualizo el binario
-    if (-not $updatedExe) {
-        $passiveArgs = "/P $scopeFlag /D=$appDirClean"
-        Write-Log "Attempt 2 (NSIS passive): $passiveArgs"
-        try {
-            $p2 = Start-Process -FilePath $payload -ArgumentList $passiveArgs -Wait -PassThru
-            Write-Log "Attempt 2 exit code: $($p2.ExitCode)"
-        } catch {
-            Write-Log "Attempt 2 exception: $($_.Exception.Message)"
-        }
-        Start-Sleep -Milliseconds 1000
-        $updatedExe = Find-UpdatedExecutable -OldHash $oldHash
-    }
-
-    # Intento 3: Respaldo interactivo si el sistema bloqueo ambos modos desatendidos
-    if (-not $updatedExe) {
-        $fallbackArgs = "$scopeFlag /D=$appDirClean"
-        Write-Log "Attempt 3 (NSIS interactive fallback): $fallbackArgs"
-        try {
-            $p3 = Start-Process -FilePath $payload -ArgumentList $fallbackArgs -Wait -PassThru
-            Write-Log "Attempt 3 exit code: $($p3.ExitCode)"
-        } catch {
-            Write-Log "Attempt 3 exception: $($_.Exception.Message)"
-        }
-        Start-Sleep -Milliseconds 1000
-        $updatedExe = Find-UpdatedExecutable -OldHash $oldHash
-    }
-
-    if ($updatedExe) {
-        Write-Log "Verified updated executable at: $updatedExe (version=$(Get-ExeVersion -Path $updatedExe))"
-        if ($updatedExe.ToLowerInvariant() -ne $currentExe.ToLowerInvariant() -and (Test-Path -LiteralPath $currentExe)) {
-            $synced = Replace-ExeFile -SourceExe $updatedExe -DestExe $currentExe
-            Write-Log "Synced updated executable back to original path ($currentExe): $synced"
-            if ($synced -and (Test-ExeMatchesTarget -ExePath $currentExe -OldHash $oldHash)) {
-                $launchExe = $currentExe
-            } else {
-                $launchExe = $updatedExe
-            }
-        } else {
-            $launchExe = $updatedExe
-        }
-    } else {
-        Write-Log "WARNING: Updated binary not confirmed; falling back to existing executable."
-    }
-}
-
-# 2. Garantizar que exista un ejecutable valido para relanzar
-if (-not (Test-Path -LiteralPath $launchExe)) {
-    $fallbackCandidates = @(
-        (Join-Path $appDirClean 'diskvault-clean.exe'),
-        (Join-Path $appDirClean 'DiskVault Clean.exe'),
-        (Join-Path $env:LOCALAPPDATA 'DiskVault Clean\diskvault-clean.exe'),
-        (Join-Path $env:LOCALAPPDATA 'DiskVault Clean\DiskVault Clean.exe'),
-        (Join-Path $env:ProgramFiles 'DiskVault Clean\diskvault-clean.exe'),
-        (Join-Path $env:ProgramFiles 'DiskVault Clean\DiskVault Clean.exe')
-    )
-    foreach ($cand in $fallbackCandidates) {
-        if (Test-Path -LiteralPath $cand) {
-            $launchExe = $cand
-            break
-        }
-    }
-}
-
-Start-Sleep -Milliseconds 500
-if (Test-Path -LiteralPath $launchExe) {
-    $workDir = Split-Path -Parent $launchExe
-    Write-Log "Relaunching updated app: $launchExe"
-    try {
-        $null = Start-Process -FilePath $launchExe -WorkingDirectory $workDir -PassThru
-    } catch {
-        Write-Log "Direct relaunch failed: $($_.Exception.Message)"
-    }
-
-    Start-Sleep -Seconds 2
-    $procName = [System.IO.Path]::GetFileNameWithoutExtension($launchExe)
-    $alive = Get-Process -Name $procName -ErrorAction SilentlyContinue
-    if (-not $alive) {
-        Write-Log "Process not detected after direct launch; retrying via explorer.exe"
-        try {
-            Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $launchExe + '"')
-        } catch {
-            Write-Log "Explorer relaunch failed: $($_.Exception.Message)"
-        }
-    } else {
-        Write-Log "New instance confirmed running (count=$($alive.Count))."
-    }
-} else {
-    Write-Log "ERROR: Could not locate executable to relaunch."
-}
-
-Start-Sleep -Seconds 3
-Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-"#;
-
-    let mut script_bytes = Vec::with_capacity(ps_script.len() + 3);
-    script_bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]); // UTF-8 BOM para PowerShell 5.1
-    script_bytes.extend_from_slice(ps_script.as_bytes());
-    fs::write(&script_path, &script_bytes)
-        .map_err(|err| format!("No se pudo preparar el asistente de actualización: {err}"))?;
-
-    // Si la carpeta de instalación requiere permisos de Administrador y aún no estamos elevados,
-    // pedimos UAC AHORA (con la ventana visible) antes de cerrar la app.
+    // Si la carpeta de instalación requiere Administrador y no estamos elevados aún,
+    // pedimos elevación UAC AHORA (con la ventana visible) antes de cerrar la app.
     let needs_elevation =
         !crate::uac::is_running_as_admin() && (!can_write_to_dir(app_dir) || is_under_program_files(app_dir));
 
     if needs_elevation {
-        spawn_elevated_updater_powershell(&script_path, &config_path)?;
-        return Ok(());
+        let params = format!("{APPLY_UPDATE_FLAG} \"{}\"", config_path.display());
+        match shell_execute_windows("runas", &helper_exe, Some(&params), Some(staging_dir), false) {
+            Ok(()) => return Ok(()),
+            Err((code, err_code)) => {
+                if err_code == ERROR_CANCELLED.0 || code == 5 {
+                    return Err(
+                        "Se canceló el permiso de Administrador (UAC) necesario para actualizar la aplicación. No se cerró DiskVault Clean."
+                            .to_string(),
+                    );
+                }
+                return Err(format!(
+                    "No se pudo iniciar el actualizador nativo como Administrador (código {code}, detalle {err_code})."
+                ));
+            }
+        }
     }
 
-    Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(&script_path)
-        .arg("-ConfigPath")
+    Command::new(&helper_exe)
+        .arg(APPLY_UPDATE_FLAG)
         .arg(&config_path)
+        .current_dir(staging_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
         .spawn()
-        .map_err(|err| format!("No se pudo iniciar el proceso de actualización automática: {err}"))?;
+        .map_err(|err| format!("No se pudo iniciar el actualizador nativo: {err}"))?;
 
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn launch_windows_self_updater(
+fn launch_windows_native_updater(
     _payload_path: &Path,
     _staging_dir: &Path,
     _is_portable: bool,
-    _target_version: &str,
+    _req: &InstallUpdateRequest,
     _logs_dir: &Path,
 ) -> Result<(), String> {
     Err("La instalación automática con reinicio solo está disponible en Windows.".to_string())
 }
+
+// ==================== EJECUCIÓN DEL ASISTENTE NATIVO (--apply-update) ====================
+
+fn append_updater_log(log_path: &Path, message: &str) {
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(file, "[{ts}] {message}");
+    }
+}
+
+/// Extrae el ejecutable principal (`.exe` más grande) y opcionalmente `LEEME_PORTABLE.txt`
+/// desde un paquete `.zip` oficial en Rust puro (sin PowerShell).
+fn extract_exe_from_portable_zip(
+    zip_path: &Path,
+    extract_dir: &Path,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let _ = fs::remove_dir_all(extract_dir);
+    fs::create_dir_all(extract_dir)
+        .map_err(|err| format!("No se pudo crear carpeta de extracción: {err}"))?;
+
+    let zip_file = File::open(zip_path)
+        .map_err(|err| format!("No se pudo abrir el paquete ZIP: {err}"))?;
+    let mut archive = zip::ZipArchive::new(zip_file)
+        .map_err(|err| format!("El archivo ZIP de actualización es inválido: {err}"))?;
+
+    let mut best_exe: Option<(PathBuf, u64)> = None;
+    let mut readme_path: Option<PathBuf> = None;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|err| format!("No se pudo leer entrada del ZIP: {err}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(safe_rel) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        let out_path = extract_dir.join(&safe_rel);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("No se pudo crear subcarpeta de extracción: {err}"))?;
+        }
+        let mut out = File::create(&out_path)
+            .map_err(|err| format!("No se pudo extraer archivo del ZIP: {err}"))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|err| format!("Error al descomprimir archivo del ZIP: {err}"))?;
+        drop(out);
+
+        let file_name_lower = out_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if file_name_lower.ends_with(".exe") {
+            let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+            if best_exe.as_ref().map_or(true, |(_, best_sz)| size > *best_sz) {
+                best_exe = Some((out_path, size));
+            }
+        } else if file_name_lower == "leeme_portable.txt" {
+            readme_path = Some(out_path);
+        }
+    }
+
+    let (exe_path, _) = best_exe.ok_or_else(|| {
+        "El paquete ZIP de actualización no contenía ningún ejecutable (.exe).".to_string()
+    })?;
+
+    Ok((exe_path, readme_path))
+}
+
+/// Reemplaza de forma atómica un archivo ejecutable en Windows (con respaldo `.old` si sigue bloqueado).
+fn replace_executable_atomically(source_exe: &Path, dest_exe: &Path) -> bool {
+    let expected_hash = compute_file_sha256(source_exe);
+
+    for _ in 0..20 {
+        if fs::copy(source_exe, dest_exe).is_ok() {
+            if expected_hash.is_none() || compute_file_sha256(dest_exe) == expected_hash {
+                return true;
+            }
+        }
+
+        // En Windows un .exe recién cerrado o bloqueado se puede renombrar a .old y colocar el nuevo
+        let mut old_os = dest_exe.as_os_str().to_os_string();
+        old_os.push(".old");
+        let old_backup = PathBuf::from(old_os);
+        let _ = fs::remove_file(&old_backup);
+
+        if dest_exe.exists() && fs::rename(dest_exe, &old_backup).is_ok() {
+            if fs::copy(source_exe, dest_exe).is_ok() {
+                if expected_hash.is_none() || compute_file_sha256(dest_exe) == expected_hash {
+                    return true;
+                }
+            } else {
+                // Restaurar si falló la copia
+                let _ = fs::rename(&old_backup, dest_exe);
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(350));
+    }
+
+    false
+}
+
+#[cfg(windows)]
+fn wait_for_old_process_exit(old_pid: u32, log_path: &Path) {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, old_pid) {
+            let wait_res = WaitForSingleObject(handle, 8_000);
+            if wait_res != WAIT_OBJECT_0 {
+                append_updater_log(
+                    log_path,
+                    &format!("PID {old_pid} seguía activo tras 8s; cerrando proceso limpiamente."),
+                );
+                let _ = TerminateProcess(handle, 0);
+                let _ = WaitForSingleObject(handle, 3_000);
+            }
+            let _ = CloseHandle(handle);
+        }
+    }
+
+    // Dar margen al sistema de archivos y a WebView2 para soltar todos los handles
+    std::thread::sleep(Duration::from_millis(800));
+}
+
+#[cfg(windows)]
+fn find_updated_installed_exe(
+    current_exe: &Path,
+    app_dir: &Path,
+    old_hash: Option<&str>,
+    install_started_at: SystemTime,
+) -> Option<PathBuf> {
+    // 1. Comprobar primero el propio ejecutable original
+    if current_exe.exists() {
+        if let (Some(old), Some(cur)) = (old_hash, compute_file_sha256(current_exe)) {
+            if cur != old {
+                return Some(current_exe.to_path_buf());
+            }
+        }
+    }
+
+    // 2. Comprobar rutas estándar de NSIS por si el instalador escribió en otra carpeta
+    let mut dirs: Vec<PathBuf> = vec![app_dir.to_path_buf()];
+    if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(&local_app).join("DiskVault Clean"));
+        dirs.push(PathBuf::from(&local_app).join("Programs").join("DiskVault Clean"));
+    }
+    for pf_var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Ok(pf) = std::env::var(pf_var) {
+            dirs.push(PathBuf::from(pf).join("DiskVault Clean"));
+        }
+    }
+
+    let current_name = current_exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("diskvault-clean.exe")
+        .to_string();
+    let exe_names = [
+        current_name.as_str(),
+        "diskvault-clean.exe",
+        "DiskVault Clean.exe",
+        "DiskVaultClean.exe",
+    ];
+
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        for name in exe_names {
+            let cand = dir.join(name);
+            if !cand.is_file() {
+                continue;
+            }
+            let modified_recently = fs::metadata(&cand)
+                .and_then(|m| m.modified())
+                .map(|m| m >= install_started_at)
+                .unwrap_or(false);
+            let hash_changed = match (old_hash, compute_file_sha256(&cand)) {
+                (Some(old), Some(cur)) => cur != old,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if hash_changed && (modified_recently || cand != current_exe) {
+                return Some(cand);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn relaunch_updated_executable(launch_exe: &Path, log_path: &Path) {
+    use std::process::Command;
+
+    let work_dir = launch_exe.parent();
+    append_updater_log(
+        log_path,
+        &format!("Relanzando aplicación actualizada: {}", launch_exe.display()),
+    );
+
+    if let Err((code, err)) = shell_execute_windows("open", launch_exe, None, work_dir, true) {
+        append_updater_log(
+            log_path,
+            &format!("ShellExecuteW('open') devolvió código {code} (err {err}); probando Command::spawn"),
+        );
+        let mut cmd = Command::new(launch_exe);
+        if let Some(dir) = work_dir {
+            cmd.current_dir(dir);
+        }
+        if let Err(spawn_err) = cmd.spawn() {
+            append_updater_log(
+                log_path,
+                &format!("ERROR al relanzar {}: {spawn_err}", launch_exe.display()),
+            );
+        }
+    }
+}
+
+/// Punto de entrada del proceso auxiliar nativo `DiskVaultUpdater.exe --apply-update <config.json>`.
+#[cfg(windows)]
+pub fn run_native_updater_helper(config_path: &Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let Ok(raw) = fs::read_to_string(config_path) else {
+        return;
+    };
+    let Ok(cfg) = serde_json::from_str::<NativeUpdateConfig>(&raw) else {
+        return;
+    };
+
+    let log_path = PathBuf::from(&cfg.log_path);
+    let payload_path = PathBuf::from(&cfg.payload_path);
+    let staging_dir = PathBuf::from(&cfg.staging_dir);
+    let current_exe = PathBuf::from(&cfg.current_exe);
+    let app_dir = PathBuf::from(&cfg.app_dir);
+
+    append_updater_log(
+        &log_path,
+        &format!(
+            "=== Inicio actualizador nativo v{} (portable={}) ===",
+            cfg.target_version, cfg.is_portable
+        ),
+    );
+    append_updater_log(
+        &log_path,
+        &format!(
+            "Ejecutable actual: {} | Paquete: {}",
+            current_exe.display(),
+            payload_path.display()
+        ),
+    );
+
+    let old_hash = compute_file_sha256(&current_exe);
+    wait_for_old_process_exit(cfg.old_pid, &log_path);
+
+    let mut launch_exe = current_exe.clone();
+    let install_started_at = SystemTime::now()
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or_else(SystemTime::now);
+
+    if cfg.is_portable || cfg.payload_path.to_ascii_lowercase().ends_with(".zip") {
+        let extract_dir = staging_dir.join("extracted");
+        match extract_exe_from_portable_zip(&payload_path, &extract_dir) {
+            Ok((new_exe, readme_opt)) => {
+                let replaced = replace_executable_atomically(&new_exe, &current_exe);
+                append_updater_log(
+                    &log_path,
+                    &format!("Reemplazo binario portable en {}: {replaced}", current_exe.display()),
+                );
+                if let Some(readme_src) = readme_opt {
+                    let _ = fs::copy(readme_src, app_dir.join("LEEME_PORTABLE.txt"));
+                }
+            }
+            Err(err) => {
+                append_updater_log(&log_path, &format!("Error extrayendo ZIP portable: {err}"));
+            }
+        }
+    } else {
+        let scope_flag = if is_under_program_files(&app_dir) {
+            "/ALLUSERS"
+        } else {
+            "/CURRENTUSER"
+        };
+
+        // Intento 1: NSIS silencioso exacto (/S /ALLUSERS|/CURRENTUSER /D=C:\ruta sin comillas)
+        let silent_args = build_nsis_install_args("/S", scope_flag, &cfg.app_dir);
+        append_updater_log(&log_path, &format!("Intento 1 NSIS silencioso: {silent_args}"));
+        match Command::new(&payload_path).raw_arg(&silent_args).status() {
+            Ok(status) => append_updater_log(
+                &log_path,
+                &format!("Intento 1 NSIS finalizó con estado: {status}"),
+            ),
+            Err(err) => append_updater_log(&log_path, &format!("Error Intento 1 NSIS: {err}")),
+        }
+        std::thread::sleep(Duration::from_millis(900));
+
+        let mut updated_exe = find_updated_installed_exe(
+            &current_exe,
+            &app_dir,
+            old_hash.as_deref(),
+            install_started_at,
+        );
+
+        // Intento 2: NSIS en modo pasivo automático (/P) si /S no reemplazó el binario
+        if updated_exe.is_none() {
+            let passive_args = build_nsis_install_args("/P", scope_flag, &cfg.app_dir);
+            append_updater_log(&log_path, &format!("Intento 2 NSIS pasivo: {passive_args}"));
+            match Command::new(&payload_path).raw_arg(&passive_args).status() {
+                Ok(status) => append_updater_log(
+                    &log_path,
+                    &format!("Intento 2 NSIS finalizó con estado: {status}"),
+                ),
+                Err(err) => append_updater_log(&log_path, &format!("Error Intento 2 NSIS: {err}")),
+            }
+            std::thread::sleep(Duration::from_millis(900));
+            updated_exe = find_updated_installed_exe(
+                &current_exe,
+                &app_dir,
+                old_hash.as_deref(),
+                install_started_at,
+            );
+        }
+
+        // Intento 3 (Red de seguridad infalible): si NSIS no actualizó el binario,
+        // descargamos el .zip oficial del mismo Release (verificado por SHA-256) y reemplazamos en caliente.
+        if updated_exe.is_none() {
+            if let (Some(ref zip_url), Some(ref zip_name)) =
+                (&cfg.portable_fallback_url, &cfg.portable_fallback_name)
+            {
+                append_updater_log(
+                    &log_path,
+                    &format!("Intento 3 respaldo directo ZIP oficial: {zip_name}"),
+                );
+                if let Ok(client) = build_http_client(300) {
+                    let fallback_zip_path = staging_dir.join(zip_name);
+                    match download_verified_file(
+                        &client,
+                        zip_url,
+                        zip_name,
+                        &fallback_zip_path,
+                        cfg.checksums_url.as_deref(),
+                        None,
+                    ) {
+                        Ok(_) => {
+                            let extract_dir = staging_dir.join("fallback_extracted");
+                            match extract_exe_from_portable_zip(&fallback_zip_path, &extract_dir) {
+                                Ok((new_exe, _)) => {
+                                    if replace_executable_atomically(&new_exe, &current_exe) {
+                                        append_updater_log(
+                                            &log_path,
+                                            "Respaldo directo ZIP reemplazó el ejecutable correctamente.",
+                                        );
+                                        updated_exe = Some(current_exe.clone());
+                                    }
+                                }
+                                Err(err) => append_updater_log(
+                                    &log_path,
+                                    &format!("Error extrayendo respaldo ZIP: {err}"),
+                                ),
+                            }
+                        }
+                        Err(err) => append_updater_log(
+                            &log_path,
+                            &format!("Error descargando respaldo ZIP: {err}"),
+                        ),
+                    }
+                }
+            }
+        }
+
+        if let Some(found_new) = updated_exe {
+            append_updater_log(
+                &log_path,
+                &format!("Binario actualizado confirmado en: {}", found_new.display()),
+            );
+            // Si NSIS actualizó en otra ruta distinta al acceso directo original, sincronizar también current_exe
+            let same_path = found_new
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&current_exe.to_string_lossy());
+            if !same_path && current_exe.exists() {
+                let synced = replace_executable_atomically(&found_new, &current_exe);
+                append_updater_log(
+                    &log_path,
+                    &format!(
+                        "Sincronización hacia acceso directo original ({}): {synced}",
+                        current_exe.display()
+                    ),
+                );
+                launch_exe = if synced { current_exe.clone() } else { found_new };
+            } else {
+                launch_exe = found_new;
+            }
+        } else {
+            append_updater_log(
+                &log_path,
+                "AVISO: No se confirmó cambio de binario; relanzando ejecutable existente.",
+            );
+        }
+    }
+
+    // Asegurar ruta existente antes de relanzar
+    if !launch_exe.exists() {
+        for cand in [
+            app_dir.join("diskvault-clean.exe"),
+            app_dir.join("DiskVault Clean.exe"),
+        ] {
+            if cand.exists() {
+                launch_exe = cand;
+                break;
+            }
+        }
+    }
+
+    std::thread::sleep(Duration::from_millis(400));
+    if launch_exe.exists() {
+        relaunch_updated_executable(&launch_exe, &log_path);
+    } else {
+        append_updater_log(
+            &log_path,
+            "ERROR: No se encontró ejecutable válido para relanzar.",
+        );
+    }
+
+    // Limpiar archivos pesados del staging (la carpeta completa se borra al iniciar la nueva ventana)
+    let _ = fs::remove_file(&payload_path);
+    let _ = fs::remove_file(config_path);
+}
+
+#[cfg(not(windows))]
+pub fn run_native_updater_helper(_config_path: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -1064,10 +1302,18 @@ mod tests {
             r"/S /ALLUSERS /D=C:\Program Files\DiskVault Clean"
         );
         assert_eq!(
-            build_nsis_install_args("/P", "/CURRENTUSER", r"C:\Users\Demo\AppData\Local\DiskVault Clean"),
+            build_nsis_install_args(
+                "/P",
+                "/CURRENTUSER",
+                r"C:\Users\Demo\AppData\Local\DiskVault Clean"
+            ),
             r"/P /CURRENTUSER /D=C:\Users\Demo\AppData\Local\DiskVault Clean"
         );
-        assert!(is_under_program_files(Path::new(r"C:\Program Files\DiskVault Clean")));
-        assert!(!is_under_program_files(Path::new(r"C:\Users\Demo\AppData\Local\DiskVault Clean")));
+        assert!(is_under_program_files(Path::new(
+            r"C:\Program Files\DiskVault Clean"
+        )));
+        assert!(!is_under_program_files(Path::new(
+            r"C:\Users\Demo\AppData\Local\DiskVault Clean"
+        )));
     }
 }

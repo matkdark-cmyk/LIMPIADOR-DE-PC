@@ -11,6 +11,8 @@ export interface UpdateCheckResult {
   assetSizeBytes: number;
   checksumsUrl: string | null;
   isPortablePackage: boolean;
+  portableFallbackUrl?: string | null;
+  portableFallbackName?: string | null;
 }
 
 export interface UpdateProgressEvent {
@@ -27,4 +29,6 @@ export interface InstallUpdateRequest {
   assetName: string;
   checksumsUrl: string | null;
   isPortablePackage: boolean;
+  portableFallbackUrl?: string | null;
+  portableFallbackName?: string | null;
 }

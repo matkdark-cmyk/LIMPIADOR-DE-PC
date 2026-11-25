@@ -1105,9 +1105,16 @@ fn is_critical_operation_running(mover_state: State<'_, MoverState>) -> bool {
 #[tauri::command]
 async fn check_for_updates(state: State<'_, AppState>) -> Result<UpdateCheckResult, String> {
     let is_portable = state.paths.is_portable;
-    tokio::task::spawn_blocking(move || check_github_updates(is_portable))
-        .await
-        .map_err(|err| format!("Error interno al comprobar actualizaciones: {err}"))?
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("diskvault-update-check".to_string())
+        .spawn(move || {
+            let _ = tx.send(check_github_updates(is_portable));
+        })
+        .map_err(|err| format!("No se pudo iniciar la comprobación de actualizaciones: {err}"))?;
+
+    rx.await
+        .map_err(|_| "La comprobación de actualizaciones finalizó inesperadamente.".to_string())?
 }
 
 #[tauri::command]
@@ -1132,11 +1139,21 @@ async fn download_and_install_update(
         )),
     );
 
-    tokio::task::spawn_blocking(move || {
-        download_and_apply_update(&app_handle, &request, is_portable, &logs_dir)
-    })
-    .await
-    .map_err(|err| format!("Error interno al instalar la actualización: {err}"))?
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("diskvault-update-install".to_string())
+        .spawn(move || {
+            let _ = tx.send(download_and_apply_update(
+                &app_handle,
+                &request,
+                is_portable,
+                &logs_dir,
+            ));
+        })
+        .map_err(|err| format!("No se pudo iniciar el hilo de actualización: {err}"))?;
+
+    rx.await
+        .map_err(|_| "El proceso de descarga e instalación finalizó inesperadamente.".to_string())?
 }
 
 // ==================== COMANDOS DE TEMA NATIVO DE WINDOWS ====================
