@@ -332,12 +332,70 @@ fn emit_update_progress(
     );
 }
 
+/// Elimina archivos temporales `.old` dejados por una sustitución en caliente del ejecutable.
+pub fn cleanup_old_update_artifacts() {
+    if let Ok(exe_path) = std::env::current_exe() {
+        let mut old_os = exe_path.as_os_str().to_os_string();
+        old_os.push(".old");
+        let old_path = std::path::PathBuf::from(old_os);
+        if old_path.exists() {
+            let _ = fs::remove_file(&old_path);
+        }
+    }
+}
+
+/// Comprueba si una ruta pertenece a `Program Files` / `Program Files (x86)` en Windows.
+pub fn is_under_program_files(dir: &Path) -> bool {
+    let normalized = dir
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+
+    for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Ok(pf) = std::env::var(var) {
+            let pf_norm = pf
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_ascii_lowercase();
+            if !pf_norm.is_empty()
+                && (normalized == pf_norm || normalized.starts_with(&format!("{pf_norm}\\")))
+            {
+                return true;
+            }
+        }
+    }
+
+    normalized.contains("\\program files\\") || normalized.contains("\\program files (x86)\\")
+}
+
+/// Construye los argumentos exactos para el instalador NSIS de Tauri v2.
+/// Por especificación de NSIS, `/D=<ruta>` DEBE ir al final y SIN comillas aunque tenga espacios.
+pub fn build_nsis_install_args(mode_flag: &str, scope_flag: &str, app_dir: &str) -> String {
+    let clean_dir = app_dir.trim().trim_end_matches(['\\', '/']);
+    let mut parts: Vec<&str> = Vec::new();
+    if !mode_flag.trim().is_empty() {
+        parts.push(mode_flag.trim());
+    }
+    if !scope_flag.trim().is_empty() {
+        parts.push(scope_flag.trim());
+    }
+    if clean_dir.is_empty() {
+        parts.join(" ")
+    } else if parts.is_empty() {
+        format!("/D={clean_dir}")
+    } else {
+        format!("{} /D={clean_dir}", parts.join(" "))
+    }
+}
+
 /// Descarga el paquete confirmado, verifica su SHA-256 si `SHA256SUMS.txt` está presente,
 /// lanza el actualizador desacoplado en Windows y cierra la instancia actual para reiniciarse.
 pub fn download_and_apply_update(
     app_handle: &AppHandle,
     req: &InstallUpdateRequest,
     is_portable: bool,
+    logs_dir: &Path,
 ) -> Result<(), String> {
     let safe_filename = sanitize_asset_filename(&req.asset_name)?;
     validate_update_url(&req.download_url)?;
@@ -458,11 +516,97 @@ pub fn download_and_apply_update(
     );
 
     // 3. Lanzar asistente desacoplado de actualización + reinicio automático en Windows
-    launch_windows_self_updater(&payload_path, &staging_dir, is_portable)?;
+    launch_windows_self_updater(
+        &payload_path,
+        &staging_dir,
+        is_portable,
+        &req.version,
+        logs_dir,
+    )?;
 
-    // 4. Cerrar limpiamente la instancia actual para que el actualizador reemplace y abra la ventana nueva
+    // 4. Breve pausa para asegurar que la UI reciba el evento y el asistente arranque antes de cerrar
+    std::thread::sleep(Duration::from_millis(350));
     app_handle.exit(0);
     Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateHelperConfig {
+    old_pid: u32,
+    payload_path: String,
+    staging_dir: String,
+    current_exe: String,
+    app_dir: String,
+    is_portable: bool,
+    target_version: String,
+    log_path: String,
+}
+
+#[cfg(windows)]
+fn can_write_to_dir(dir: &Path) -> bool {
+    let probe = dir.join(format!(".dv_update_probe_{}.tmp", std::process::id()));
+    match File::create(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(windows)]
+fn spawn_elevated_updater_powershell(script_path: &Path, config_path: &Path) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_CANCELLED, HWND};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let params = format!(
+        "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" -ConfigPath \"{}\"",
+        script_path.display(),
+        config_path.display()
+    );
+
+    let to_wide = |value: &OsStr| -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    };
+
+    let verb_wide = to_wide(OsStr::new("runas"));
+    let exe_wide = to_wide(OsStr::new("powershell.exe"));
+    let params_wide = to_wide(OsStr::new(&params));
+
+    let result = unsafe {
+        ShellExecuteW(
+            HWND::default(),
+            PCWSTR(verb_wide.as_ptr()),
+            PCWSTR(exe_wide.as_ptr()),
+            PCWSTR(params_wide.as_ptr()),
+            PCWSTR::null(),
+            SW_HIDE,
+        )
+    };
+
+    let code = result.0 as isize;
+    if code > 32 {
+        return Ok(());
+    }
+
+    let last_error = unsafe { GetLastError() };
+    if last_error == ERROR_CANCELLED || code == 5 {
+        return Err(
+            "Se canceló el permiso de Administrador (UAC) necesario para actualizar la carpeta de instalación. No se cerró la aplicación."
+                .to_string(),
+        );
+    }
+
+    Err(format!(
+        "No se pudo iniciar el asistente elevado de actualización (código {}, detalle {}).",
+        code, last_error.0
+    ))
 }
 
 #[cfg(windows)]
@@ -470,12 +614,15 @@ fn launch_windows_self_updater(
     payload_path: &Path,
     staging_dir: &Path,
     is_portable: bool,
+    target_version: &str,
+    logs_dir: &Path,
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
+    // IMPORTANTE: En Win32 NO se deben combinar CREATE_NO_WINDOW y DETACHED_PROCESS.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
     let current_exe = std::env::current_exe().map_err(|err| {
         format!("No se pudo determinar la ruta del ejecutable actual para reiniciar: {err}")
@@ -484,25 +631,199 @@ fn launch_windows_self_updater(
         .parent()
         .ok_or_else(|| "No se pudo determinar la carpeta del ejecutable actual.".to_string())?;
 
-    // Script PowerShell limpio que lee todos los parámetros desde variables de entorno
-    // (inmune a inyección por comillas o caracteres especiales en rutas).
-    let script_path = staging_dir.join("apply_update.ps1");
-    let ps_script = r#"
-$ErrorActionPreference = 'Continue'
-$oldPid = [int]$env:DV_OLD_PID
-$payload = $env:DV_PAYLOAD_PATH
-$stagingDir = $env:DV_STAGING_DIR
-$currentExe = $env:DV_CURRENT_EXE
-$appDir = $env:DV_APP_DIR
-$isPortable = ($env:DV_IS_PORTABLE -eq '1')
+    let _ = fs::create_dir_all(logs_dir);
+    let log_path = logs_dir.join("updater.log");
 
+    // Guardar todos los parámetros en JSON UTF-8 para sobrevivir incluso cruces UAC ("runas")
+    let config_path = staging_dir.join("update_config.json");
+    let config = UpdateHelperConfig {
+        old_pid: std::process::id(),
+        payload_path: payload_path.to_string_lossy().to_string(),
+        staging_dir: staging_dir.to_string_lossy().to_string(),
+        current_exe: current_exe.to_string_lossy().to_string(),
+        app_dir: app_dir.to_string_lossy().to_string(),
+        is_portable,
+        target_version: target_version.trim().trim_start_matches(['v', 'V']).to_string(),
+        log_path: log_path.to_string_lossy().to_string(),
+    };
+    let config_json = serde_json::to_string_pretty(&config)
+        .map_err(|err| format!("No se pudo serializar la configuración de actualización: {err}"))?;
+    fs::write(&config_path, config_json.as_bytes())
+        .map_err(|err| format!("No se pudo guardar la configuración de actualización: {err}"))?;
+
+    // Script PowerShell puro ASCII guardado con BOM UTF-8 para máxima compatibilidad con PowerShell 5.1
+    let script_path = staging_dir.join("apply_update.ps1");
+    let ps_script = r#"param(
+    [Parameter(Mandatory = $true)]
+    [string]$ConfigPath
+)
+
+$ErrorActionPreference = 'Continue'
+
+$cfg = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$oldPid = [int]$cfg.oldPid
+$payload = [string]$cfg.payloadPath
+$stagingDir = [string]$cfg.stagingDir
+$currentExe = [string]$cfg.currentExe
+$appDir = [string]$cfg.appDir
+$appDirClean = $appDir.TrimEnd('\', '/')
+$isPortable = [bool]$cfg.isPortable
+$targetVer = [string]$cfg.targetVersion
+$logPath = [string]$cfg.logPath
+
+function Write-Log {
+    param([string]$Message)
+    try {
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -LiteralPath $logPath -Value "[$ts] $Message" -Encoding UTF8
+    } catch {}
+}
+
+function Get-SafeHash {
+    param([string]$Path)
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    } catch {}
+    return ''
+}
+
+function Get-ExeVersion {
+    param([string]$Path)
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            $vi = (Get-Item -LiteralPath $Path).VersionInfo
+            if ($vi -and $vi.ProductVersion) { return ([string]$vi.ProductVersion).Trim() }
+            if ($vi -and $vi.FileVersion) { return ([string]$vi.FileVersion).Trim() }
+        }
+    } catch {}
+    return ''
+}
+
+function Test-ExeMatchesTarget {
+    param([string]$ExePath, [string]$OldHash)
+    if (-not (Test-Path -LiteralPath $ExePath)) { return $false }
+    $ver = Get-ExeVersion -Path $ExePath
+    if ($targetVer -and $ver -and $ver.StartsWith($targetVer)) {
+        return $true
+    }
+    $newHash = Get-SafeHash -Path $ExePath
+    if ($OldHash -and $newHash -and ($newHash -ne $OldHash)) {
+        return $true
+    }
+    return $false
+}
+
+function Replace-ExeFile {
+    param([string]$SourceExe, [string]$DestExe)
+    $srcHash = Get-SafeHash -Path $SourceExe
+    for ($attempt = 1; $attempt -le 15; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force -ErrorAction Stop
+            $dstHash = Get-SafeHash -Path $DestExe
+            if (-not $srcHash -or $dstHash -eq $srcHash) {
+                return $true
+            }
+        } catch {
+            try {
+                $oldBackup = "$DestExe.old"
+                if (Test-Path -LiteralPath $oldBackup) {
+                    Remove-Item -LiteralPath $oldBackup -Force -ErrorAction SilentlyContinue
+                }
+                if (Test-Path -LiteralPath $DestExe) {
+                    Move-Item -LiteralPath $DestExe -Destination $oldBackup -Force -ErrorAction Stop
+                }
+                Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force -ErrorAction Stop
+                return $true
+            } catch {
+                Start-Sleep -Milliseconds 400
+            }
+        }
+    }
+    return $false
+}
+
+function Find-UpdatedExecutable {
+    param([string]$OldHash)
+    if (Test-ExeMatchesTarget -ExePath $currentExe -OldHash $OldHash) {
+        return $currentExe
+    }
+
+    $dirs = @(
+        $appDirClean,
+        (Join-Path $env:LOCALAPPDATA 'DiskVault Clean'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\DiskVault Clean'),
+        (Join-Path $env:ProgramFiles 'DiskVault Clean')
+    )
+    if (${env:ProgramFiles(x86)}) {
+        $dirs += (Join-Path ${env:ProgramFiles(x86)} 'DiskVault Clean')
+    }
+
+    $exeNames = @(
+        (Split-Path -Leaf $currentExe),
+        'diskvault-clean.exe',
+        'DiskVault Clean.exe',
+        'DiskVaultClean.exe'
+    )
+
+    foreach ($d in ($dirs | Select-Object -Unique)) {
+        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($n in ($exeNames | Select-Object -Unique)) {
+            $cand = Join-Path $d $n
+            if (Test-Path -LiteralPath $cand) {
+                $ver = Get-ExeVersion -Path $cand
+                if ($targetVer -and $ver -and $ver.StartsWith($targetVer)) {
+                    return $cand
+                }
+            }
+        }
+    }
+
+    foreach ($d in ($dirs | Select-Object -Unique)) {
+        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($n in ($exeNames | Select-Object -Unique)) {
+            $cand = Join-Path $d $n
+            if (Test-ExeMatchesTarget -ExePath $cand -OldHash $OldHash) {
+                return $cand
+            }
+        }
+    }
+
+    return $null
+}
+
+Write-Log "=== Starting DiskVault Clean auto-update to v$targetVer (portable=$isPortable) ==="
+Write-Log "CurrentExe: $currentExe | Payload: $payload"
+
+$oldHash = Get-SafeHash -Path $currentExe
+Write-Log "OldExeHash: $oldHash"
+
+# 1. Esperar a que termine la instancia anterior y liberar bloqueos de archivo
+for ($w = 0; $w -lt 24; $w++) {
+    $p = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+    if (-not $p) { break }
+    Start-Sleep -Milliseconds 250
+}
+$stillRunning = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+if ($stillRunning) {
+    Write-Log "Force stopping old PID $oldPid"
+    Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 800
+}
+
+# Cerrar cualquier otra instancia que este ejecutando exactamente el mismo binario
 try {
-    $proc = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-    if ($proc) {
-        $null = $proc.WaitForExit(30000)
+    $normCurrent = $currentExe.ToLowerInvariant()
+    Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Id -ne $PID -and $_.Path -and $_.Path.ToLowerInvariant() -eq $normCurrent
+    } | ForEach-Object {
+        Write-Log "Stopping sibling process PID $($_.Id)"
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
 } catch {}
-Start-Sleep -Milliseconds 600
+
+Start-Sleep -Milliseconds 900
 
 $launchExe = $currentExe
 
@@ -518,54 +839,145 @@ if ($isPortable) {
         Select-Object -First 1
 
     if ($newExe) {
-        for ($i = 0; $i -lt 10; $i++) {
-            try {
-                Copy-Item -LiteralPath $newExe.FullName -Destination $currentExe -Force -ErrorAction Stop
-                break
-            } catch {
-                Start-Sleep -Milliseconds 400
-            }
-        }
+        $ok = Replace-ExeFile -SourceExe $newExe.FullName -DestExe $currentExe
+        Write-Log "Portable binary replace result: $ok"
     }
 
     $readmeSrc = Join-Path $extractDir 'LEEME_PORTABLE.txt'
     if (Test-Path -LiteralPath $readmeSrc) {
-        Copy-Item -LiteralPath $readmeSrc -Destination (Join-Path $appDir 'LEEME_PORTABLE.txt') -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $readmeSrc -Destination (Join-Path $appDirClean 'LEEME_PORTABLE.txt') -Force -ErrorAction SilentlyContinue
     }
 } else {
-    $installProc = Start-Process -FilePath $payload -ArgumentList '/S' -PassThru -Wait
-    if ($installProc -and $installProc.ExitCode -ne 0) {
-        # Respaldo interactivo si el instalador requiere elevación UAC para instalación global
-        Start-Process -FilePath $payload -Wait
+    $pf1 = if ($env:ProgramFiles) { $env:ProgramFiles.TrimEnd('\').ToLowerInvariant() } else { '' }
+    $pf2 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)}.TrimEnd('\').ToLowerInvariant() } else { '' }
+    $appLower = $appDirClean.ToLowerInvariant()
+
+    $isMachineInstall = ($pf1 -and $appLower.StartsWith($pf1)) -or ($pf2 -and $appLower.StartsWith($pf2))
+    $scopeFlag = if ($isMachineInstall) { '/ALLUSERS' } else { '/CURRENTUSER' }
+
+    # Intento 1: Instalacion silenciosa exacta en el mismo alcance y carpeta (/D= SIEMPRE al final y sin comillas)
+    $silentArgs = "/S $scopeFlag /D=$appDirClean"
+    Write-Log "Attempt 1 (NSIS silent): $silentArgs"
+    try {
+        $p1 = Start-Process -FilePath $payload -ArgumentList $silentArgs -Wait -PassThru
+        Write-Log "Attempt 1 exit code: $($p1.ExitCode)"
+    } catch {
+        Write-Log "Attempt 1 exception: $($_.Exception.Message)"
+    }
+    Start-Sleep -Milliseconds 1000
+
+    $updatedExe = Find-UpdatedExecutable -OldHash $oldHash
+
+    # Intento 2: Modo pasivo automatico (/P) si el modo silencioso /S no actualizo el binario
+    if (-not $updatedExe) {
+        $passiveArgs = "/P $scopeFlag /D=$appDirClean"
+        Write-Log "Attempt 2 (NSIS passive): $passiveArgs"
+        try {
+            $p2 = Start-Process -FilePath $payload -ArgumentList $passiveArgs -Wait -PassThru
+            Write-Log "Attempt 2 exit code: $($p2.ExitCode)"
+        } catch {
+            Write-Log "Attempt 2 exception: $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 1000
+        $updatedExe = Find-UpdatedExecutable -OldHash $oldHash
     }
 
-    if (-not (Test-Path -LiteralPath $launchExe)) {
-        $candidates = @(
-            (Join-Path $env:LOCALAPPDATA 'DiskVault Clean\DiskVault Clean.exe'),
-            (Join-Path $env:LOCALAPPDATA 'Programs\DiskVault Clean\DiskVault Clean.exe'),
-            (Join-Path $env:ProgramFiles 'DiskVault Clean\DiskVault Clean.exe')
-        )
-        foreach ($cand in $candidates) {
-            if (Test-Path -LiteralPath $cand) {
-                $launchExe = $cand
-                break
+    # Intento 3: Respaldo interactivo si el sistema bloqueo ambos modos desatendidos
+    if (-not $updatedExe) {
+        $fallbackArgs = "$scopeFlag /D=$appDirClean"
+        Write-Log "Attempt 3 (NSIS interactive fallback): $fallbackArgs"
+        try {
+            $p3 = Start-Process -FilePath $payload -ArgumentList $fallbackArgs -Wait -PassThru
+            Write-Log "Attempt 3 exit code: $($p3.ExitCode)"
+        } catch {
+            Write-Log "Attempt 3 exception: $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 1000
+        $updatedExe = Find-UpdatedExecutable -OldHash $oldHash
+    }
+
+    if ($updatedExe) {
+        Write-Log "Verified updated executable at: $updatedExe (version=$(Get-ExeVersion -Path $updatedExe))"
+        if ($updatedExe.ToLowerInvariant() -ne $currentExe.ToLowerInvariant() -and (Test-Path -LiteralPath $currentExe)) {
+            $synced = Replace-ExeFile -SourceExe $updatedExe -DestExe $currentExe
+            Write-Log "Synced updated executable back to original path ($currentExe): $synced"
+            if ($synced -and (Test-ExeMatchesTarget -ExePath $currentExe -OldHash $oldHash)) {
+                $launchExe = $currentExe
+            } else {
+                $launchExe = $updatedExe
             }
+        } else {
+            $launchExe = $updatedExe
+        }
+    } else {
+        Write-Log "WARNING: Updated binary not confirmed; falling back to existing executable."
+    }
+}
+
+# 2. Garantizar que exista un ejecutable valido para relanzar
+if (-not (Test-Path -LiteralPath $launchExe)) {
+    $fallbackCandidates = @(
+        (Join-Path $appDirClean 'diskvault-clean.exe'),
+        (Join-Path $appDirClean 'DiskVault Clean.exe'),
+        (Join-Path $env:LOCALAPPDATA 'DiskVault Clean\diskvault-clean.exe'),
+        (Join-Path $env:LOCALAPPDATA 'DiskVault Clean\DiskVault Clean.exe'),
+        (Join-Path $env:ProgramFiles 'DiskVault Clean\diskvault-clean.exe'),
+        (Join-Path $env:ProgramFiles 'DiskVault Clean\DiskVault Clean.exe')
+    )
+    foreach ($cand in $fallbackCandidates) {
+        if (Test-Path -LiteralPath $cand) {
+            $launchExe = $cand
+            break
         }
     }
 }
 
-Start-Sleep -Milliseconds 400
+Start-Sleep -Milliseconds 500
 if (Test-Path -LiteralPath $launchExe) {
     $workDir = Split-Path -Parent $launchExe
-    Start-Process -FilePath $launchExe -WorkingDirectory $workDir
+    Write-Log "Relaunching updated app: $launchExe"
+    try {
+        $null = Start-Process -FilePath $launchExe -WorkingDirectory $workDir -PassThru
+    } catch {
+        Write-Log "Direct relaunch failed: $($_.Exception.Message)"
+    }
+
+    Start-Sleep -Seconds 2
+    $procName = [System.IO.Path]::GetFileNameWithoutExtension($launchExe)
+    $alive = Get-Process -Name $procName -ErrorAction SilentlyContinue
+    if (-not $alive) {
+        Write-Log "Process not detected after direct launch; retrying via explorer.exe"
+        try {
+            Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $launchExe + '"')
+        } catch {
+            Write-Log "Explorer relaunch failed: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Log "New instance confirmed running (count=$($alive.Count))."
+    }
+} else {
+    Write-Log "ERROR: Could not locate executable to relaunch."
 }
 
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 3
 Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 "#;
 
-    fs::write(&script_path, ps_script.as_bytes())
+    let mut script_bytes = Vec::with_capacity(ps_script.len() + 3);
+    script_bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]); // UTF-8 BOM para PowerShell 5.1
+    script_bytes.extend_from_slice(ps_script.as_bytes());
+    fs::write(&script_path, &script_bytes)
         .map_err(|err| format!("No se pudo preparar el asistente de actualización: {err}"))?;
+
+    // Si la carpeta de instalación requiere permisos de Administrador y aún no estamos elevados,
+    // pedimos UAC AHORA (con la ventana visible) antes de cerrar la app.
+    let needs_elevation =
+        !crate::uac::is_running_as_admin() && (!can_write_to_dir(app_dir) || is_under_program_files(app_dir));
+
+    if needs_elevation {
+        spawn_elevated_updater_powershell(&script_path, &config_path)?;
+        return Ok(());
+    }
 
     Command::new("powershell.exe")
         .args([
@@ -578,13 +990,12 @@ Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContin
             "-File",
         ])
         .arg(&script_path)
-        .env("DV_OLD_PID", std::process::id().to_string())
-        .env("DV_PAYLOAD_PATH", payload_path)
-        .env("DV_STAGING_DIR", staging_dir)
-        .env("DV_CURRENT_EXE", &current_exe)
-        .env("DV_APP_DIR", app_dir)
-        .env("DV_IS_PORTABLE", if is_portable { "1" } else { "0" })
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .arg("-ConfigPath")
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|err| format!("No se pudo iniciar el proceso de actualización automática: {err}"))?;
 
@@ -596,13 +1007,19 @@ fn launch_windows_self_updater(
     _payload_path: &Path,
     _staging_dir: &Path,
     _is_portable: bool,
+    _target_version: &str,
+    _logs_dir: &Path,
 ) -> Result<(), String> {
     Err("La instalación automática con reinicio solo está disponible en Windows.".to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_expected_sha256, is_newer_version, parse_semver, validate_update_url};
+    use super::{
+        build_nsis_install_args, extract_expected_sha256, is_newer_version, is_under_program_files,
+        parse_semver, validate_update_url,
+    };
+    use std::path::Path;
 
     #[test]
     fn compara_versiones_semanticas_correctamente() {
@@ -638,5 +1055,19 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string())
         );
         assert_eq!(extract_expected_sha256(sample, "otro.exe"), None);
+    }
+
+    #[test]
+    fn construye_argumentos_nsis_exactos_con_ruta_al_final_sin_comillas() {
+        assert_eq!(
+            build_nsis_install_args("/S", "/ALLUSERS", r"C:\Program Files\DiskVault Clean\"),
+            r"/S /ALLUSERS /D=C:\Program Files\DiskVault Clean"
+        );
+        assert_eq!(
+            build_nsis_install_args("/P", "/CURRENTUSER", r"C:\Users\Demo\AppData\Local\DiskVault Clean"),
+            r"/P /CURRENTUSER /D=C:\Users\Demo\AppData\Local\DiskVault Clean"
+        );
+        assert!(is_under_program_files(Path::new(r"C:\Program Files\DiskVault Clean")));
+        assert!(!is_under_program_files(Path::new(r"C:\Users\Demo\AppData\Local\DiskVault Clean")));
     }
 }

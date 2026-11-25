@@ -1117,6 +1117,7 @@ async fn download_and_install_update(
     request: InstallUpdateRequest,
 ) -> Result<(), String> {
     let is_portable = state.paths.is_portable;
+    let logs_dir = state.paths.logs_dir.clone();
     let version = request.version.clone();
 
     let _ = state.db.record_audit_log(
@@ -1132,7 +1133,7 @@ async fn download_and_install_update(
     );
 
     tokio::task::spawn_blocking(move || {
-        download_and_apply_update(&app_handle, &request, is_portable)
+        download_and_apply_update(&app_handle, &request, is_portable, &logs_dir)
     })
     .await
     .map_err(|err| format!("Error interno al instalar la actualización: {err}"))?
@@ -1158,6 +1159,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            updater::cleanup_old_update_artifacts();
+
             let paths = resolve_app_paths()
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
 

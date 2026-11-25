@@ -1,6 +1,6 @@
 [package]
 name = "diskvault-clean"
-version = "1.3.0"
+version = "1.3.1"
 description = "DiskVault Clean — Suite de análisis de disco, migración segura al NAS, gestión de apps, limpieza de caché y optimización de RAM para Windows."
 authors = ["DiskVault Clean"]
 edition = "2021"
