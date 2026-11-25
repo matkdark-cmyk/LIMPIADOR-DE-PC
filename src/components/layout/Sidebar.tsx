@@ -101,7 +101,7 @@ export function Sidebar() {
         <div className="mt-2 flex items-center justify-between px-3 pt-1 text-xs text-slate-400 dark:text-slate-500">
           <span>Windows x64</span>
           <span className="font-mono tabular-nums">
-            v{appStatus?.appVersion ?? '0.1.0'}
+            v{appStatus?.appVersion ?? '1.2.0'}
           </span>
         </div>
       </div>

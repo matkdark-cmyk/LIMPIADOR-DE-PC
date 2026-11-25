@@ -60,6 +60,7 @@ interface NasStoreState {
   isCheckingPreflight: boolean;
   preflightError: string | null;
 
+  isScanPromptOpen: boolean;
   isScanningThreats: boolean;
   pendingThreatReport: ThreatScanReport | null;
   stoppedThreatReport: ThreatScanReport | null;
@@ -89,6 +90,10 @@ interface NasStoreState {
   pickDestFolder: () => Promise<void>;
   runPreflight: () => Promise<void>;
 
+  requestStartTransfer: () => void;
+  closeScanPrompt: () => void;
+  confirmTransferWithVirusScan: () => Promise<void>;
+  confirmTransferWithoutVirusScan: () => Promise<void>;
   startTransfer: (bypassThreatWarning?: boolean) => Promise<void>;
   stopTransferDueToThreats: () => Promise<void>;
   acceptThreatsAndContinue: () => Promise<void>;
@@ -118,6 +123,7 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
   isCheckingPreflight: false,
   preflightError: null,
 
+  isScanPromptOpen: false,
   isScanningThreats: false,
   pendingThreatReport: null,
   stoppedThreatReport: null,
@@ -348,6 +354,42 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
         preflightError: extractError(err),
       });
     }
+  },
+
+  requestStartTransfer: () => {
+    const { sourcePath, destRoot, isTransferring, isScanningThreats } = get();
+    if (isTransferring || isScanningThreats) {
+      return;
+    }
+    if (!sourcePath.trim() || !destRoot.trim()) {
+      useAppStore.getState().addToast({
+        title: 'Faltan rutas de origen o destino',
+        message: 'Completa el origen y el destino antes de iniciar la migración segura.',
+        variant: 'warning',
+      });
+      return;
+    }
+    if (!isTauriRuntime()) {
+      useAppStore.getState().addToast({
+        title: 'Migrador disponible en la app de Windows',
+        message: 'Ejecuta "npm run tauri dev" en Windows para iniciar transferencias reales con xxHash3.',
+        variant: 'info',
+      });
+      return;
+    }
+    set({ isScanPromptOpen: true });
+  },
+
+  closeScanPrompt: () => set({ isScanPromptOpen: false }),
+
+  confirmTransferWithVirusScan: async () => {
+    set({ isScanPromptOpen: false });
+    await get().startTransfer(false);
+  },
+
+  confirmTransferWithoutVirusScan: async () => {
+    set({ isScanPromptOpen: false });
+    await get().startTransfer(true);
   },
 
   startTransfer: async (bypassThreatWarning = false) => {

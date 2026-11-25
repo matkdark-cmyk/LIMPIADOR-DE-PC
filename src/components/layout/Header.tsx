@@ -2,6 +2,7 @@ import {
   ArrowDownCircle,
   HardDriveDownload,
   Loader2,
+  Monitor,
   Moon,
   Shield,
   ShieldCheck,
@@ -9,14 +10,32 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { useUpdaterStore } from '../../store/useUpdaterStore';
+import type { ThemeMode } from '../../types';
 import { ROUTE_CATALOG } from '../../utils/formatters';
+
+const THEME_SWITCH_OPTIONS: {
+  id: ThemeMode;
+  label: string;
+  title: string;
+  icon: typeof Sun;
+}[] = [
+  { id: 'light', label: 'Claro', title: 'Activar tema claro', icon: Sun },
+  { id: 'dark', label: 'Oscuro', title: 'Activar modo oscuro', icon: Moon },
+  {
+    id: 'system',
+    label: 'Windows',
+    title: 'Usar automáticamente el tema y colores de Windows',
+    icon: Monitor,
+  },
+];
 
 export function Header() {
   const activeRoute = useAppStore((state) => state.activeRoute);
   const appStatus = useAppStore((state) => state.appStatus);
   const isElevating = useAppStore((state) => state.isElevating);
-  const resolvedTheme = useAppStore((state) => state.resolvedTheme);
-  const toggleTheme = useAppStore((state) => state.toggleTheme);
+  const theme = useAppStore((state) => state.theme);
+  const isSavingSettings = useAppStore((state) => state.isSavingSettings);
+  const setThemeMode = useAppStore((state) => state.setThemeMode);
   const requestAdminElevation = useAppStore((state) => state.requestAdminElevation);
   const updateInfo = useUpdaterStore((state) => state.updateInfo);
   const openUpdateModal = useUpdaterStore((state) => state.openUpdateModal);
@@ -26,7 +45,7 @@ export function Header() {
   const isPortable = appStatus?.isPortable ?? false;
 
   return (
-    <header className="flex h-[72px] shrink-0 items-center justify-between gap-6 border-b border-slate-200 bg-white px-8 dark:border-slate-800 dark:bg-slate-900">
+    <header className="flex h-[72px] shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-8 dark:border-slate-800 dark:bg-slate-900">
       {/* Título y subtítulo en lenguaje claro */}
       <div className="min-w-0">
         <h1 className="truncate text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
@@ -37,8 +56,8 @@ export function Header() {
         </p>
       </div>
 
-      {/* Controles de sesión: Actualización, Portable, UAC y Tema */}
-      <div className="flex shrink-0 items-center gap-3">
+      {/* Controles de sesión: Actualización, Portable, UAC y Selector Claro / Oscuro / Windows */}
+      <div className="flex shrink-0 items-center gap-2.5">
         {updateInfo?.updateAvailable && (
           <button
             type="button"
@@ -67,7 +86,7 @@ export function Header() {
             className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 whitespace-nowrap shrink-0 dark:border-emerald-800/70 dark:bg-emerald-950/50 dark:text-emerald-300"
           >
             <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-            <span>Modo Administrador Activo</span>
+            <span>Modo Administrador</span>
           </div>
         ) : (
           <button
@@ -75,7 +94,7 @@ export function Header() {
             disabled={isElevating}
             onClick={() => void requestAdminElevation()}
             title="Solicitar permisos de Administrador de Windows (UAC) manteniendo la vista actual"
-            className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-900 transition-colors duration-150 hover:bg-amber-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600 disabled:cursor-not-allowed disabled:opacity-60 whitespace-nowrap shrink-0 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200 dark:hover:bg-amber-500/25"
+            className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 transition-colors duration-150 hover:bg-amber-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600 disabled:cursor-not-allowed disabled:opacity-60 whitespace-nowrap shrink-0 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200 dark:hover:bg-amber-500/25"
           >
             {isElevating ? (
               <Loader2 className="h-4 w-4 animate-spin shrink-0" />
@@ -83,20 +102,40 @@ export function Header() {
               <Shield className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
             )}
             <span>
-              {isElevating ? 'Solicitando permisos...' : 'Activar Modo Administrador'}
+              {isElevating ? 'Solicitando...' : 'Modo Administrador'}
             </span>
           </button>
         )}
 
-        <button
-          type="button"
-          onClick={() => void toggleTheme()}
-          aria-label={resolvedTheme === 'dark' ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro'}
-          title={resolvedTheme === 'dark' ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro'}
-          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition-colors duration-150 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+        {/* Selector rápido de tema: Claro / Oscuro / Windows */}
+        <div
+          role="group"
+          aria-label="Seleccionar tema visual"
+          className="inline-flex shrink-0 items-center rounded-lg border border-slate-200 bg-slate-100 p-0.5 dark:border-slate-700 dark:bg-slate-800"
         >
-          {resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </button>
+          {THEME_SWITCH_OPTIONS.map((opt) => {
+            const Icon = opt.icon;
+            const isSelected = theme === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                disabled={isSavingSettings}
+                aria-pressed={isSelected}
+                title={opt.title}
+                onClick={() => void setThemeMode(opt.id)}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-blue-600 ${
+                  isSelected
+                    ? 'bg-white text-blue-600 shadow-xs dark:bg-slate-900 dark:text-blue-400'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+                <span>{opt.label}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </header>
   );

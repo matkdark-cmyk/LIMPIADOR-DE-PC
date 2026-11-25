@@ -2,28 +2,34 @@ import { useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
 
 /**
- * Escucha cambios del tema del sistema operativo (`prefers-color-scheme`)
- * para actualizar instantáneamente la interfaz cuando el tema es "Seguir a Windows".
+ * Sincroniza automáticamente el tema Claro/Oscuro y el color de énfasis real de Windows
+ * tanto al cambiar `prefers-color-scheme` como al volver el foco a la ventana tras
+ * modificar la personalización en Configuración de Windows.
  */
 export function useThemeSystemSync(): void {
   const theme = useAppStore((state) => state.theme);
-  const syncSystemTheme = useAppStore((state) => state.syncSystemTheme);
+  const refreshWindowsTheme = useAppStore((state) => state.refreshWindowsTheme);
 
   useEffect(() => {
-    if (theme !== 'system' || typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    if (typeof window === 'undefined') {
       return;
     }
 
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    syncSystemTheme();
-
-    const handleChange = () => {
-      syncSystemTheme();
+    const handleRefresh = () => {
+      void refreshWindowsTheme();
     };
 
-    mediaQuery.addEventListener('change', handleChange);
+    window.addEventListener('focus', handleRefresh);
+
+    let mediaQuery: MediaQueryList | null = null;
+    if (typeof window.matchMedia === 'function') {
+      mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      mediaQuery.addEventListener('change', handleRefresh);
+    }
+
     return () => {
-      mediaQuery.removeEventListener('change', handleChange);
+      window.removeEventListener('focus', handleRefresh);
+      mediaQuery?.removeEventListener('change', handleRefresh);
     };
-  }, [theme, syncSystemTheme]);
+  }, [theme, refreshWindowsTheme]);
 }

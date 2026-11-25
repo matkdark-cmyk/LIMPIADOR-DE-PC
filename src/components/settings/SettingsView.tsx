@@ -84,6 +84,7 @@ function extractError(err: unknown): string {
 export function SettingsView() {
   const isTauri = useAppStore((s) => s.isTauri);
   const appStatus = useAppStore((s) => s.appStatus);
+  const windowsTheme = useAppStore((s) => s.windowsTheme);
   const settings = useAppStore((s) => s.settings);
   const isSavingSettings = useAppStore((s) => s.isSavingSettings);
   const auditLogs = useAppStore((s) => s.auditLogs);
@@ -418,6 +419,28 @@ export function SettingsView() {
                   </button>
                 );
               })}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs dark:border-slate-800 dark:bg-slate-950/60">
+              <div className="flex items-center gap-2.5">
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-4 shrink-0 rounded-sm border border-black/15 dark:border-white/20"
+                  style={{ backgroundColor: windowsTheme.accentHex }}
+                />
+                <span className="text-slate-700 dark:text-slate-300">
+                  Color de énfasis de Windows sincronizado automáticamente:{' '}
+                  <strong className="font-mono font-semibold text-slate-900 dark:text-slate-100">
+                    {windowsTheme.accentHex}
+                  </strong>
+                </span>
+              </div>
+              <span className="text-slate-500 dark:text-slate-400">
+                Tema actual del equipo:{' '}
+                <strong className="font-semibold text-slate-700 dark:text-slate-200">
+                  {windowsTheme.systemPrefersDark ? 'Oscuro' : 'Claro'}
+                </strong>
+              </span>
             </div>
           </div>
 
@@ -986,7 +1009,7 @@ export function SettingsView() {
           <div className="space-y-1">
             <p className="text-xs text-slate-500 dark:text-slate-400">Versión de DiskVault Clean</p>
             <p className="font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
-              v{appStatus?.appVersion ?? '1.1.0'}
+              v{appStatus?.appVersion ?? '1.2.0'}
             </p>
           </div>
 

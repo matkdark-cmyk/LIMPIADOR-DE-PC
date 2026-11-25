@@ -5,6 +5,7 @@ pub mod ram;
 pub mod scanner;
 pub mod security;
 pub mod storage;
+pub mod theme;
 pub mod uac;
 pub mod updater;
 
@@ -53,6 +54,7 @@ use storage::settings::{
     AppSettings,
 };
 use tauri::{AppHandle, Manager, State};
+use theme::{read_windows_theme_info, resolve_tauri_window_theme, WindowsThemeInfo};
 use updater::{
     check_github_updates, download_and_apply_update, InstallUpdateRequest, UpdateCheckResult,
 };
@@ -1039,6 +1041,21 @@ async fn download_and_install_update(
     .map_err(|err| format!("Error interno al instalar la actualización: {err}"))?
 }
 
+// ==================== COMANDOS DE TEMA NATIVO DE WINDOWS ====================
+
+#[tauri::command]
+fn get_windows_theme() -> WindowsThemeInfo {
+    read_windows_theme_info()
+}
+
+#[tauri::command]
+fn apply_native_window_theme(window: tauri::WebviewWindow, mode: String) -> Result<(), String> {
+    let tauri_theme = resolve_tauri_window_theme(&mode);
+    window
+        .set_theme(tauri_theme)
+        .map_err(|err| format!("No se pudo sincronizar el tema nativo de la ventana: {err}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1075,6 +1092,16 @@ pub fn run() {
                     "Inicio correcto ({mode_label}, permisos: {privilege_label}, vista inicial: {initial_route})."
                 )),
             );
+
+            let saved_theme = db
+                .get_setting("theme")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "system".to_string());
+
+            if let Some(main_window) = app.get_webview_window("main") {
+                let _ = main_window.set_theme(resolve_tauri_window_theme(&saved_theme));
+            }
 
             let ram_auto_cfg = load_auto_config_from_db(&db);
 
@@ -1145,6 +1172,8 @@ pub fn run() {
             is_critical_operation_running,
             check_for_updates,
             download_and_install_update,
+            get_windows_theme,
+            apply_native_window_theme,
         ])
         .run(tauri::generate_context!())
         .expect("Error crítico al iniciar DiskVault Clean");

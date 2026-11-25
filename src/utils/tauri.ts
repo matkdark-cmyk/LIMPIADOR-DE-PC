@@ -32,6 +32,7 @@ import type {
   TransferResult,
   UninstallExecutionResult,
   UpdateCheckResult,
+  WindowsThemeInfo,
 } from '../types';
 
 declare global {
@@ -419,6 +420,17 @@ export async function invokeDownloadAndInstallUpdate(
 ): Promise<void> {
   await invoke<void>('download_and_install_update', { request });
 }
+
+// ==================== IPC TEMA NATIVO DE WINDOWS ====================
+
+export async function fetchWindowsTheme(): Promise<WindowsThemeInfo> {
+  return invoke<WindowsThemeInfo>('get_windows_theme');
+}
+
+export async function invokeApplyNativeWindowTheme(mode: ThemeMode): Promise<void> {
+  await invoke<void>('apply_native_window_theme', { mode });
+}
+
 
 
 

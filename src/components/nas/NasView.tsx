@@ -3,6 +3,7 @@ import { useNasStore, type NasSectionTab } from '../../store/useNasStore';
 import { useScannerStore } from '../../store/useScannerStore';
 import { HistoryTable } from './HistoryTable';
 import { NasTargetManager } from './NasTargetManager';
+import { ScanPromptModal } from './ScanPromptModal';
 import { ThreatConsentModal } from './ThreatConsentModal';
 import { TransferQueue } from './TransferQueue';
 import { TransferWizard } from './TransferWizard';
@@ -79,6 +80,7 @@ export function NasView() {
       {activeSubTab === 'targets' && <NasTargetManager />}
       {activeSubTab === 'history' && <HistoryTable />}
 
+      <ScanPromptModal />
       <ThreatConsentModal />
     </div>
   );

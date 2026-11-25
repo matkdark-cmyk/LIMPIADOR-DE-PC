@@ -8,6 +8,7 @@ export type {
   ThemeMode,
   ToastItem,
   ToastVariant,
+  WindowsThemeInfo,
 } from './system';
 
 export type {

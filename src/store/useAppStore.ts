@@ -8,17 +8,21 @@ import type {
   ThemeMode,
   ToastItem,
   ToastVariant,
+  WindowsThemeInfo,
 } from '../types';
 import {
   fetchAllSettings,
   fetchAppStatus,
   fetchRecentAuditLogs,
+  fetchWindowsTheme,
   invokeAdminElevation,
+  invokeApplyNativeWindowTheme,
   invokeResetSettingsToDefault,
   invokeSaveSetting,
   invokeUpdateAllSettings,
   isTauriRuntime,
 } from '../utils/tauri';
+import { applyWindowsAccentToDocument, DEFAULT_WINDOWS_ACCENT } from '../utils/windowsTheme';
 
 const LOCAL_THEME_KEY = 'diskvault_theme_preview';
 
@@ -33,12 +37,24 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   startWithWindows: false,
 };
 
-export function resolveThemeMode(mode: ThemeMode): ResolvedTheme {
+const DEFAULT_WINDOWS_THEME_INFO: WindowsThemeInfo = {
+  accentHex: DEFAULT_WINDOWS_ACCENT,
+  systemPrefersDark: false,
+  accentOnTitlebar: false,
+};
+
+export function resolveThemeMode(
+  mode: ThemeMode,
+  systemPrefersDarkOverride?: boolean,
+): ResolvedTheme {
   if (mode === 'dark') {
     return 'dark';
   }
   if (mode === 'light') {
     return 'light';
+  }
+  if (typeof systemPrefersDarkOverride === 'boolean') {
+    return systemPrefersDarkOverride ? 'dark' : 'light';
   }
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -46,8 +62,11 @@ export function resolveThemeMode(mode: ThemeMode): ResolvedTheme {
   return 'light';
 }
 
-function applyThemeToDocument(mode: ThemeMode): ResolvedTheme {
-  const resolved = resolveThemeMode(mode);
+function applyThemeToDocument(
+  mode: ThemeMode,
+  systemPrefersDarkOverride?: boolean,
+): ResolvedTheme {
+  const resolved = resolveThemeMode(mode, systemPrefersDarkOverride);
   if (typeof document !== 'undefined') {
     const root = document.documentElement;
     if (resolved === 'dark') {
@@ -55,6 +74,9 @@ function applyThemeToDocument(mode: ThemeMode): ResolvedTheme {
     } else {
       root.classList.remove('dark');
     }
+  }
+  if (isTauriRuntime()) {
+    void invokeApplyNativeWindowTheme(mode).catch(() => {});
   }
   return resolved;
 }
@@ -92,6 +114,7 @@ interface AppStoreState {
   uacBannerDismissed: boolean;
   theme: ThemeMode;
   resolvedTheme: ResolvedTheme;
+  windowsTheme: WindowsThemeInfo;
   settings: AppSettings;
   hasLoadedSettings: boolean;
   isSavingSettings: boolean;
@@ -100,6 +123,7 @@ interface AppStoreState {
   toasts: ToastItem[];
 
   initializeApp: () => Promise<AppSettings | null>;
+  refreshWindowsTheme: () => Promise<void>;
   refreshDiagnostics: () => Promise<void>;
   refreshAuditLogs: (limit?: number) => Promise<void>;
   loadSettings: () => Promise<AppSettings | null>;
@@ -128,6 +152,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   uacBannerDismissed: false,
   theme: initialBrowserTheme,
   resolvedTheme: resolveThemeMode(initialBrowserTheme),
+  windowsTheme: DEFAULT_WINDOWS_THEME_INFO,
   settings: { ...DEFAULT_APP_SETTINGS, theme: initialBrowserTheme },
   hasLoadedSettings: false,
   isSavingSettings: false,
@@ -141,7 +166,12 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
     if (!runningInTauri) {
       const browserTheme = getInitialBrowserTheme();
-      const resolved = applyThemeToDocument(browserTheme);
+      const prefersDark =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const accentHex = applyWindowsAccentToDocument(DEFAULT_WINDOWS_ACCENT);
+      const resolved = applyThemeToDocument(browserTheme, prefersDark);
       const fallbackSettings: AppSettings = {
         ...DEFAULT_APP_SETTINGS,
         theme: browserTheme,
@@ -149,6 +179,11 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       set({
         theme: browserTheme,
         resolvedTheme: resolved,
+        windowsTheme: {
+          accentHex,
+          systemPrefersDark: prefersDark,
+          accentOnTitlebar: false,
+        },
         settings: fallbackSettings,
         hasLoadedSettings: true,
         isLoadingStatus: false,
@@ -158,13 +193,19 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
 
     try {
-      const [status, loadedSettings] = await Promise.all([
+      const [status, loadedSettings, winThemeRaw] = await Promise.all([
         fetchAppStatus(),
         fetchAllSettings().catch(() => null),
+        fetchWindowsTheme().catch(() => DEFAULT_WINDOWS_THEME_INFO),
       ]);
 
+      const accentHex = applyWindowsAccentToDocument(winThemeRaw.accentHex);
+      const winTheme: WindowsThemeInfo = {
+        ...winThemeRaw,
+        accentHex,
+      };
       const effectiveTheme: ThemeMode = loadedSettings?.theme ?? status.theme;
-      const resolved = applyThemeToDocument(effectiveTheme);
+      const resolved = applyThemeToDocument(effectiveTheme, winTheme.systemPrefersDark);
       const effectiveSettings: AppSettings = loadedSettings ?? {
         ...DEFAULT_APP_SETTINGS,
         theme: effectiveTheme,
@@ -175,6 +216,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         activeRoute: status.initialRoute,
         theme: effectiveTheme,
         resolvedTheme: resolved,
+        windowsTheme: winTheme,
         settings: effectiveSettings,
         hasLoadedSettings: true,
         isLoadingStatus: false,
@@ -195,6 +237,37 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         variant: 'error',
       });
       return null;
+    }
+  },
+
+  refreshWindowsTheme: async () => {
+    if (!isTauriRuntime()) {
+      const prefersDark =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches;
+      set((state) => ({
+        windowsTheme: { ...state.windowsTheme, systemPrefersDark: prefersDark },
+      }));
+      if (get().theme === 'system') {
+        const resolved = applyThemeToDocument('system', prefersDark);
+        set({ resolvedTheme: resolved });
+      }
+      return;
+    }
+
+    try {
+      const winThemeRaw = await fetchWindowsTheme();
+      const accentHex = applyWindowsAccentToDocument(winThemeRaw.accentHex);
+      const winTheme: WindowsThemeInfo = { ...winThemeRaw, accentHex };
+      const currentTheme = get().theme;
+      const resolved = applyThemeToDocument(currentTheme, winTheme.systemPrefersDark);
+      set({
+        windowsTheme: winTheme,
+        resolvedTheme: resolved,
+      });
+    } catch {
+      // Silencioso si no se pudo consultar el Registro en segundo plano
     }
   },
 
@@ -256,7 +329,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
     try {
       const loaded = await fetchAllSettings();
-      const resolved = applyThemeToDocument(loaded.theme);
+      const resolved = applyThemeToDocument(loaded.theme, get().windowsTheme.systemPrefersDark);
       set((state) => ({
         settings: loaded,
         theme: loaded.theme,
@@ -278,7 +351,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   updateSettings: async (patch, options) => {
     const previous = get().settings;
     const next: AppSettings = { ...previous, ...patch };
-    const nextResolved = applyThemeToDocument(next.theme);
+    const sysDark = get().windowsTheme.systemPrefersDark;
+    const nextResolved = applyThemeToDocument(next.theme, sysDark);
 
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(LOCAL_THEME_KEY, next.theme);
@@ -306,7 +380,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
     try {
       const saved = await invokeUpdateAllSettings(next);
-      const savedResolved = applyThemeToDocument(saved.theme);
+      const savedResolved = applyThemeToDocument(saved.theme, get().windowsTheme.systemPrefersDark);
       set((state) => ({
         settings: saved,
         theme: saved.theme,
@@ -324,7 +398,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       }
       return saved;
     } catch (err) {
-      const prevResolved = applyThemeToDocument(previous.theme);
+      const prevResolved = applyThemeToDocument(previous.theme, get().windowsTheme.systemPrefersDark);
       set((state) => ({
         settings: previous,
         theme: previous.theme,
@@ -342,8 +416,9 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
 
   resetSettings: async () => {
+    const sysDark = get().windowsTheme.systemPrefersDark;
     if (!get().isTauri) {
-      const resolved = applyThemeToDocument(DEFAULT_APP_SETTINGS.theme);
+      const resolved = applyThemeToDocument(DEFAULT_APP_SETTINGS.theme, sysDark);
       set({
         settings: { ...DEFAULT_APP_SETTINGS },
         theme: DEFAULT_APP_SETTINGS.theme,
@@ -360,7 +435,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     set({ isSavingSettings: true });
     try {
       const reset = await invokeResetSettingsToDefault();
-      const resolved = applyThemeToDocument(reset.theme);
+      const resolved = applyThemeToDocument(reset.theme, sysDark);
       set((state) => ({
         settings: reset,
         theme: reset.theme,
@@ -393,7 +468,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   setThemeMode: async (mode) => {
     const labelMap: Record<ThemeMode, string> = {
       light: 'Tema claro activado',
-      dark: 'Tema oscuro activado',
+      dark: 'Modo oscuro activado',
       system: 'Tema sincronizado con Windows',
     };
     await get().updateSettings({ theme: mode }, { toastTitle: labelMap[mode] });
@@ -401,7 +476,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
   toggleTheme: async () => {
     const nextTheme: ThemeMode = get().resolvedTheme === 'dark' ? 'light' : 'dark';
-    const resolved = applyThemeToDocument(nextTheme);
+    const resolved = applyThemeToDocument(nextTheme, get().windowsTheme.systemPrefersDark);
     set((state) => ({
       theme: nextTheme,
       resolvedTheme: resolved,
@@ -414,7 +489,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
     if (!get().isTauri) {
       get().addToast({
-        title: nextTheme === 'dark' ? 'Tema oscuro activado' : 'Tema claro activado',
+        title: nextTheme === 'dark' ? 'Modo oscuro activado' : 'Tema claro activado',
         message: 'En escritorio esta preferencia se guardará automáticamente en SQLite.',
         variant: 'info',
       });
@@ -430,7 +505,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       }));
       await get().refreshAuditLogs(20);
       get().addToast({
-        title: nextTheme === 'dark' ? 'Tema oscuro guardado' : 'Tema claro guardado',
+        title: nextTheme === 'dark' ? 'Modo oscuro guardado' : 'Tema claro guardado',
         message: 'Tu preferencia visual quedó guardada en la base de datos local.',
         variant: 'success',
       });
@@ -444,11 +519,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
 
   syncSystemTheme: () => {
-    const { theme } = get();
-    if (theme === 'system') {
-      const resolved = applyThemeToDocument('system');
-      set({ resolvedTheme: resolved });
-    }
+    void get().refreshWindowsTheme();
   },
 
   requestAdminElevation: async () => {

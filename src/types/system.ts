@@ -11,6 +11,12 @@ export type ThemeMode = 'system' | 'light' | 'dark';
 
 export type ResolvedTheme = 'light' | 'dark';
 
+export interface WindowsThemeInfo {
+  accentHex: string;
+  systemPrefersDark: boolean;
+  accentOnTitlebar: boolean;
+}
+
 export type ToastVariant = 'success' | 'warning' | 'error' | 'info';
 
 export interface AppSettings {
