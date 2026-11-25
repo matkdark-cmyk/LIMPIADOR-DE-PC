@@ -17,6 +17,7 @@ import {
   fetchWindowsTheme,
   invokeAdminElevation,
   invokeApplyNativeWindowTheme,
+  invokeDisableAdminMode,
   invokeResetSettingsToDefault,
   invokeSaveSetting,
   invokeUpdateAllSettings,
@@ -35,6 +36,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   cleanerExcludedPaths: [],
   nasDefaultMode: 'archive_free',
   startWithWindows: false,
+  alwaysRunAsAdmin: true,
 };
 
 const DEFAULT_WINDOWS_THEME_INFO: WindowsThemeInfo = {
@@ -137,6 +139,7 @@ interface AppStoreState {
   toggleTheme: () => Promise<void>;
   syncSystemTheme: () => void;
   requestAdminElevation: () => Promise<void>;
+  disableAdminMode: () => Promise<void>;
   dismissUacBanner: () => void;
   addToast: (toast: Omit<ToastItem, 'id'>) => void;
   removeToast: (id: string) => void;
@@ -524,16 +527,11 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
   requestAdminElevation: async () => {
     const { isTauri, activeRoute, appStatus } = get();
-    if (appStatus?.isAdmin) {
-      get().addToast({
-        title: 'Modo Administrador ya activo',
-        message: 'DiskVault Clean ya cuenta con permisos elevados.',
-        variant: 'info',
-      });
-      return;
-    }
 
     if (!isTauri) {
+      set((state) => ({
+        settings: { ...state.settings, alwaysRunAsAdmin: true },
+      }));
       get().addToast({
         title: 'Elevación UAC disponible solo en Windows',
         message: 'Ejecuta la app de escritorio con Tauri en Windows para solicitar permisos de Administrador.',
@@ -542,8 +540,28 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       return;
     }
 
+    if (appStatus?.isAdmin) {
+      set((state) => ({
+        settings: { ...state.settings, alwaysRunAsAdmin: true },
+      }));
+      try {
+        await invokeAdminElevation(activeRoute);
+      } catch {
+        // Ya está elevado; ignorar errores secundarios
+      }
+      get().addToast({
+        title: 'Modo Administrador activo en cada sesión',
+        message: 'DiskVault Clean mantendrá el Modo Administrador activo hasta que decidas desactivarlo.',
+        variant: 'success',
+      });
+      return;
+    }
+
     set({ isElevating: true });
     try {
+      set((state) => ({
+        settings: { ...state.settings, alwaysRunAsAdmin: true },
+      }));
       await invokeAdminElevation(activeRoute);
     } catch (err) {
       const message = extractErrorMessage(err);
@@ -557,6 +575,49 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         durationMs: 6500,
       });
       await get().refreshAuditLogs(20);
+    } finally {
+      set({ isElevating: false });
+    }
+  },
+
+  disableAdminMode: async () => {
+    const { isTauri, activeRoute } = get();
+
+    if (!isTauri) {
+      set((state) => ({
+        settings: { ...state.settings, alwaysRunAsAdmin: false },
+      }));
+      get().addToast({
+        title: 'Modo Administrador desactivado',
+        message: 'En escritorio esta preferencia se guardará automáticamente en SQLite.',
+        variant: 'info',
+      });
+      return;
+    }
+
+    set({ isElevating: true });
+    try {
+      const restarted = await invokeDisableAdminMode(activeRoute);
+      set((state) => ({
+        settings: { ...state.settings, alwaysRunAsAdmin: false },
+      }));
+      await get().refreshAuditLogs(20);
+
+      if (!restarted) {
+        get().addToast({
+          title: 'Modo Administrador desactivado',
+          message:
+            'DiskVault Clean ya no solicitará Modo Administrador automáticamente en próximas sesiones.',
+          variant: 'info',
+          durationMs: 6000,
+        });
+      }
+    } catch (err) {
+      get().addToast({
+        title: 'No se pudo desactivar el Modo Administrador',
+        message: extractErrorMessage(err),
+        variant: 'error',
+      });
     } finally {
       set({ isElevating: false });
     }

@@ -77,11 +77,29 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
       });
 
       if (!silent && !result.updateAvailable) {
-        useAppStore.getState().addToast({
-          title: 'DiskVault Clean está actualizado',
-          message: `Ya tienes la última versión disponible (v${result.currentVersion}).`,
-          variant: 'success',
-        });
+        if (result.releaseTitle === 'Sin publicaciones disponibles todavía') {
+          useAppStore.getState().addToast({
+            title: 'Aún no hay una versión publicada en Releases',
+            message:
+              'El repositorio todavía no tiene un GitHub Release publicado con instalador. Sube los cambios y espera a que termine el workflow de GitHub Actions.',
+            variant: 'info',
+            durationMs: 7000,
+          });
+        } else if (result.latestVersion !== result.currentVersion && !result.downloadUrl) {
+          useAppStore.getState().addToast({
+            title: `Release v${result.latestVersion} sin paquete compatible`,
+            message:
+              'Se encontró la publicación en GitHub, pero falta el instalador (.exe) o paquete portable (.zip) adjunto.',
+            variant: 'warning',
+            durationMs: 7000,
+          });
+        } else {
+          useAppStore.getState().addToast({
+            title: 'DiskVault Clean está actualizado',
+            message: `Ya tienes la última versión disponible (v${result.currentVersion}).`,
+            variant: 'success',
+          });
+        }
       }
 
       return result;

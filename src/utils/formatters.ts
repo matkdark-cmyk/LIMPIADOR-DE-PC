@@ -67,7 +67,9 @@ export function formatModuleName(moduleKey: string): string {
 export function formatActionName(actionKey: string): string {
   const labels: Record<string, string> = {
     app_started: 'Inicio de aplicación',
-    elevation_requested: 'Solicitud de Administrador',
+    elevation_requested: 'Modo Administrador activado',
+    auto_elevation_triggered: 'Inicio automático en Modo Administrador',
+    admin_mode_disabled: 'Modo Administrador desactivado',
     elevation_cancelled_or_failed: 'Elevación cancelada',
     setting_updated: 'Preferencia guardada',
     trash_delete: 'Enviado a Papelera',
@@ -89,6 +91,7 @@ export function formatActionName(actionKey: string): string {
     audit_cleaned: 'Historial antiguo limpiado',
     threat_scan_blocked: 'Copiado detenido por amenaza detectada',
     threat_consent_accepted: 'Advertencia de amenaza omitida por usuario',
+    phase2_warning_ignored: 'Advertencia del Paso 2 (xxHash3) omitida por usuario',
     update_install_started: 'Actualización confirmada por usuario',
   };
   return labels[actionKey] ?? actionKey;

@@ -25,8 +25,8 @@ use cleaner::engine::{
     scan_cache_targets as run_cache_scan, CacheCleanResult, CacheScanReport, CleanerState,
 };
 use mover::pipeline::{
-    execute_safe_transfer, preflight_transfer, MoverState, TransferPreflight, TransferRequest,
-    TransferResult,
+    execute_safe_transfer, finalize_transfer_without_verification, preflight_transfer, MoverState,
+    TransferPreflight, TransferRequest, TransferResult,
 };
 use mover::targets::{is_network_destination, test_nas_connection as run_nas_test, NasConnectionStatus};
 use mover::threat_scan::{scan_source_for_threats, ThreatScanReport};
@@ -110,6 +110,9 @@ fn request_admin_elevation(
 ) -> Result<(), String> {
     let safe_route = uac::sanitize_route(&current_route);
 
+    // Una vez activado por el usuario, permanece activo en cada sesión hasta que se desactive
+    let _ = state.db.save_setting("always_run_as_admin", "true");
+
     let _ = state.db.record_audit_log(
         "uac",
         "elevation_requested",
@@ -118,9 +121,13 @@ fn request_admin_elevation(
         0,
         "info",
         Some(&format!(
-            "Solicitud de Modo Administrador desde la sección '{safe_route}'."
+            "Modo Administrador activado (persistente para próximas sesiones) desde '{safe_route}'."
         )),
     );
+
+    if state.is_admin {
+        return Ok(());
+    }
 
     match uac::elevate_with_uac(&app_handle, &safe_route) {
         Ok(()) => Ok(()),
@@ -136,6 +143,34 @@ fn request_admin_elevation(
             );
             Err(err)
         }
+    }
+}
+
+#[tauri::command]
+fn disable_admin_mode(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    current_route: String,
+) -> Result<bool, String> {
+    let safe_route = uac::sanitize_route(&current_route);
+    state.db.save_setting("always_run_as_admin", "false")?;
+
+    let _ = state.db.record_audit_log(
+        "uac",
+        "admin_mode_disabled",
+        None,
+        None,
+        0,
+        "info",
+        Some(&format!(
+            "El usuario desactivó el Modo Administrador permanente desde '{safe_route}'."
+        )),
+    );
+
+    if state.is_admin {
+        uac::relaunch_as_standard_user(&app_handle, &safe_route)
+    } else {
+        Ok(false)
     }
 }
 
@@ -495,6 +530,68 @@ async fn start_safe_transfer(
             Err(error_msg)
         }
     }
+}
+
+#[tauri::command]
+async fn finalize_transfer_skip_verification(
+    app_handle: AppHandle,
+    app_state: State<'_, AppState>,
+    scan_state: State<'_, ScanState>,
+    mover_state: State<'_, MoverState>,
+    request: TransferRequest,
+) -> Result<TransferResult, String> {
+    if mover_state
+        .is_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Ya hay una transferencia en curso.".to_string());
+    }
+
+    let req_clone = request.clone();
+    let exec_result = tokio::task::spawn_blocking(move || {
+        finalize_transfer_without_verification(&req_clone, Some(app_handle))
+    })
+    .await
+    .map_err(|err| format!("Error interno al finalizar la migración: {err}"));
+
+    mover_state.is_running.store(false, Ordering::SeqCst);
+
+    let res = exec_result??;
+
+    let _ = app_state.db.record_transfer_history(
+        &res.source_path,
+        &res.dest_path,
+        res.mode.as_db_str(),
+        res.files_count,
+        res.total_bytes,
+        &res.status,
+        None,
+        res.duration_ms,
+    );
+
+    let _ = app_state.db.record_audit_log(
+        "nas",
+        "phase2_warning_ignored",
+        Some(&res.source_path),
+        Some(&res.dest_path),
+        i64::try_from(res.total_bytes).unwrap_or(i64::MAX),
+        "warning",
+        Some(&format!(
+            "El usuario ignoró la advertencia del Paso 2 (xxHash3) y completó el proceso: {}",
+            res.summary_message
+        )),
+    );
+
+    if res.local_space_freed {
+        if let Ok(mut guard) = scan_state.index.write() {
+            if let Some(index) = guard.as_mut() {
+                index.remove_deleted_path(Path::new(&res.source_path), res.total_bytes);
+            }
+        }
+    }
+
+    Ok(res)
 }
 
 #[tauri::command]
@@ -1069,6 +1166,40 @@ pub fn run() {
 
             let is_admin = uac::is_running_as_admin();
             let initial_route = uac::parse_initial_route_from_args();
+            let saved_settings = load_settings_from_db(&db, paths.is_portable);
+
+            // Modo Administrador activo por defecto en cada sesión hasta que el usuario lo desactive
+            if saved_settings.always_run_as_admin && !is_admin && !uac::has_no_auto_elevate_flag()
+            {
+                match uac::spawn_elevated_instance(&initial_route) {
+                    Ok(true) => {
+                        let _ = db.record_audit_log(
+                            "uac",
+                            "auto_elevation_triggered",
+                            None,
+                            None,
+                            0,
+                            "info",
+                            Some(
+                                "Inicio automático en Modo Administrador (preferencia persistente activa).",
+                            ),
+                        );
+                        std::process::exit(0);
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        let _ = db.record_audit_log(
+                            "uac",
+                            "elevation_cancelled_or_failed",
+                            None,
+                            None,
+                            0,
+                            "warning",
+                            Some(&err),
+                        );
+                    }
+                }
+            }
 
             let mode_label = if paths.is_portable {
                 "Modo Portable"
@@ -1093,14 +1224,8 @@ pub fn run() {
                 )),
             );
 
-            let saved_theme = db
-                .get_setting("theme")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "system".to_string());
-
             if let Some(main_window) = app.get_webview_window("main") {
-                let _ = main_window.set_theme(resolve_tauri_window_theme(&saved_theme));
+                let _ = main_window.set_theme(resolve_tauri_window_theme(&saved_settings.theme));
             }
 
             let ram_auto_cfg = load_auto_config_from_db(&db);
@@ -1125,6 +1250,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_status,
             request_admin_elevation,
+            disable_admin_mode,
             save_setting,
             get_recent_audit_logs,
             get_system_overview,
@@ -1143,6 +1269,7 @@ pub fn run() {
             scan_transfer_threats,
             record_threat_decision,
             start_safe_transfer,
+            finalize_transfer_skip_verification,
             pause_transfer,
             resume_transfer,
             cancel_transfer,

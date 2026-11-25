@@ -3,6 +3,7 @@ import { useNasStore, type NasSectionTab } from '../../store/useNasStore';
 import { useScannerStore } from '../../store/useScannerStore';
 import { HistoryTable } from './HistoryTable';
 import { NasTargetManager } from './NasTargetManager';
+import { Phase2WarningModal } from './Phase2WarningModal';
 import { ScanPromptModal } from './ScanPromptModal';
 import { ThreatConsentModal } from './ThreatConsentModal';
 import { TransferQueue } from './TransferQueue';
@@ -82,6 +83,7 @@ export function NasView() {
 
       <ScanPromptModal />
       <ThreatConsentModal />
+      <Phase2WarningModal />
     </div>
   );
 }

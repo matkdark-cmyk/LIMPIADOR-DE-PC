@@ -94,6 +94,9 @@ export function SettingsView() {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const resetSettings = useAppStore((s) => s.resetSettings);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
+  const isElevating = useAppStore((s) => s.isElevating);
+  const requestAdminElevation = useAppStore((s) => s.requestAdminElevation);
+  const disableAdminMode = useAppStore((s) => s.disableAdminMode);
   const refreshAuditLogs = useAppStore((s) => s.refreshAuditLogs);
   const setActiveRoute = useAppStore((s) => s.setActiveRoute);
   const addToast = useAppStore((s) => s.addToast);
@@ -560,6 +563,52 @@ export function SettingsView() {
         </div>
 
         <div className="space-y-6">
+          {/* Switch Modo Administrador permanente por defecto */}
+          <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-5 dark:border-slate-800">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                  Mantener Modo Administrador siempre activo en cada sesión
+                </span>
+                {isAdmin && (
+                  <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Activo ahora
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {settings.alwaysRunAsAdmin
+                  ? 'Activo por defecto: DiskVault Clean se abrirá automáticamente con permisos de Administrador en cada sesión hasta que decidas desactivarlo.'
+                  : 'Desactivado: DiskVault Clean se abrirá en modo estándar hasta que vuelvas a activarlo.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.alwaysRunAsAdmin}
+              disabled={isSavingSettings || isElevating}
+              onClick={() => {
+                if (settings.alwaysRunAsAdmin) {
+                  void disableAdminMode();
+                } else {
+                  void requestAdminElevation();
+                }
+              }}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                settings.alwaysRunAsAdmin
+                  ? 'bg-blue-600 dark:bg-blue-500'
+                  : 'bg-slate-300 dark:bg-slate-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  settings.alwaysRunAsAdmin ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
           {/* Switch Papelera de Reciclaje */}
           <div className="flex items-center justify-between gap-4">
             <div className="space-y-0.5">
@@ -1009,7 +1058,7 @@ export function SettingsView() {
           <div className="space-y-1">
             <p className="text-xs text-slate-500 dark:text-slate-400">Versión de DiskVault Clean</p>
             <p className="font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
-              v{appStatus?.appVersion ?? '1.2.0'}
+              v{appStatus?.appVersion ?? '1.3.0'}
             </p>
           </div>
 

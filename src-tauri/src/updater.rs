@@ -72,7 +72,6 @@ struct GitHubRelease {
     html_url: String,
     published_at: Option<String>,
     draft: Option<bool>,
-    prerelease: Option<bool>,
     assets: Vec<GitHubAsset>,
 }
 
@@ -172,23 +171,65 @@ fn build_http_client(timeout_secs: u64) -> Result<Client, String> {
 }
 
 /// Consulta la última versión publicada en GitHub Releases sin descargar binarios.
+/// Si `/releases/latest` devuelve 404, consulta `/releases?per_page=10` como respaldo.
 pub fn check_github_updates(is_portable: bool) -> Result<UpdateCheckResult, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let api_url = format!(
+    let latest_api_url = format!(
         "https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
     );
-    validate_update_url(&api_url)?;
+    validate_update_url(&latest_api_url)?;
 
     let client = build_http_client(20)?;
     let response = client
-        .get(&api_url)
+        .get(&latest_api_url)
         .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .map_err(|err| {
             format!("No se pudo contactar con GitHub para buscar actualizaciones: {err}")
         })?;
 
-    if response.status().as_u16() == 404 {
+    let release_opt: Option<GitHubRelease> = if response.status().is_success() {
+        let parsed: GitHubRelease = response
+            .json()
+            .map_err(|err| format!("No se pudo interpretar la respuesta de GitHub Releases: {err}"))?;
+        if parsed.draft.unwrap_or(false) {
+            None
+        } else {
+            Some(parsed)
+        }
+    } else if response.status().as_u16() == 404 {
+        // Respaldo: listar releases publicados por si ninguno está marcado como "latest"
+        let list_url = format!(
+            "https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases?per_page=10"
+        );
+        validate_update_url(&list_url)?;
+        let list_resp = client
+            .get(&list_url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .map_err(|err| {
+                format!("No se pudo consultar la lista de versiones en GitHub: {err}")
+            })?;
+
+        if list_resp.status().is_success() {
+            let releases: Vec<GitHubRelease> = list_resp.json().unwrap_or_default();
+            releases
+                .into_iter()
+                .filter(|r| !r.draft.unwrap_or(false))
+                .max_by_key(|r| parse_semver(&r.tag_name).unwrap_or((0, 0, 0)))
+        } else {
+            None
+        }
+    } else {
+        return Err(format!(
+            "GitHub respondió con estado HTTP {} al comprobar actualizaciones.",
+            response.status().as_u16()
+        ));
+    };
+
+    let Some(release) = release_opt else {
         return Ok(UpdateCheckResult {
             update_available: false,
             current_version: current_version.clone(),
@@ -205,35 +246,7 @@ pub fn check_github_updates(is_portable: bool) -> Result<UpdateCheckResult, Stri
             checksums_url: None,
             is_portable_package: is_portable,
         });
-    }
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "GitHub respondió con estado HTTP {} al comprobar actualizaciones.",
-            response.status().as_u16()
-        ));
-    }
-
-    let release: GitHubRelease = response
-        .json()
-        .map_err(|err| format!("No se pudo interpretar la respuesta de GitHub Releases: {err}"))?;
-
-    if release.draft.unwrap_or(false) || release.prerelease.unwrap_or(false) {
-        return Ok(UpdateCheckResult {
-            update_available: false,
-            current_version: current_version.clone(),
-            latest_version: current_version,
-            release_title: release.name.unwrap_or_else(|| release.tag_name.clone()),
-            release_notes: String::new(),
-            published_at: release.published_at,
-            release_url: release.html_url,
-            download_url: None,
-            asset_name: None,
-            asset_size_bytes: 0,
-            checksums_url: None,
-            is_portable_package: is_portable,
-        });
-    }
+    };
 
     let latest_version = release
         .tag_name

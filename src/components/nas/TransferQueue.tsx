@@ -41,6 +41,7 @@ function getPhaseStepIndex(phase: TransferPhase): number {
 export function TransferQueue() {
   const isTransferring = useNasStore((state) => state.isTransferring);
   const isPaused = useNasStore((state) => state.isPaused);
+  const activeSkipVerification = useNasStore((state) => state.activeSkipVerification);
   const transferProgress = useNasStore((state) => state.transferProgress);
   const lastTransferResult = useNasStore((state) => state.lastTransferResult);
   const lastTransferError = useNasStore((state) => state.lastTransferError);
@@ -53,8 +54,9 @@ export function TransferQueue() {
     return null;
   }
 
-  // Tarjeta de resultado completado con verificación 100%
+  // Tarjeta de resultado completado (con o sin Paso 2 xxHash3)
   if (!isTransferring && lastTransferResult) {
+    const isVerified = lastTransferResult.status === 'verified_completed';
     return (
       <section className="rounded-xl border border-emerald-200 bg-white p-5 dark:border-emerald-800/70 dark:bg-slate-900">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -64,7 +66,9 @@ export function TransferQueue() {
             </div>
             <div className="space-y-1">
               <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                Migración verificada con xxHash3 al 100%
+                {isVerified
+                  ? 'Migración verificada con xxHash3 al 100%'
+                  : 'Migración completada (Paso 2 xxHash3 omitido)'}
               </h3>
               <p className="text-xs leading-relaxed text-slate-600 dark:text-slate-400">
                 {lastTransferResult.summaryMessage}
@@ -159,7 +163,12 @@ export function TransferQueue() {
 
   const steps = [
     { num: 1, label: '1. Copia streaming' },
-    { num: 2, label: '2. Verificación xxHash3' },
+    {
+      num: 2,
+      label: activeSkipVerification
+        ? '2. Verificación xxHash3 (omitida)'
+        : '2. Verificación xxHash3',
+    },
     { num: 3, label: '3. Cierre seguro' },
   ];
 

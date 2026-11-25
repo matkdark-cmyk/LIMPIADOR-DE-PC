@@ -62,6 +62,10 @@ pub struct TransferRequest {
     pub mode: TransferMode,
     /// Si es `true` en `ArchiveFree` o `MoveSymlink`, envía la copia local antigua a la Papelera tras verificar.
     pub send_local_to_trash: bool,
+    /// Si es `true` (cuando el usuario eligió mover sin escaneo o ignorar la advertencia de Fase 2),
+    /// se omite automáticamente la verificación xxHash3 de la Fase 2.
+    #[serde(default)]
+    pub skip_verification: bool,
 }
 
 /// Diagnóstico previo antes de iniciar la copia (conteo, tamaño, espacio disponible).
@@ -458,33 +462,38 @@ where
     Ok(())
 }
 
-/// Fase 3 (condicionada a verificación 100% exitosa): ejecuta la política de limpieza local o enlace.
+/// Fase 3 (condicionada a verificación o confirmación explícita del usuario): ejecuta la política de limpieza local o enlace.
 fn apply_phase3_cleanup(
     source: &Path,
     final_dest: &Path,
     mode: TransferMode,
     send_local_to_trash: bool,
+    skipped_verification: bool,
 ) -> Result<(bool, bool, String), String> {
+    let verify_tag = if skipped_verification {
+        "Copia completada (Paso 2 xxHash3 omitido por elección del usuario)."
+    } else {
+        "Verificado con xxHash3 al 100%."
+    };
+
     match mode {
         TransferMode::CopyBackup => Ok((
             false,
             false,
-            "Copia verificada con xxHash3 al 100%. Tus archivos originales se conservan intactos en tu PC."
-                .to_string(),
+            format!("{verify_tag} Tus archivos originales se conservan intactos en tu PC."),
         )),
 
         TransferMode::ArchiveFree => {
             if send_local_to_trash {
                 trash::delete(source).map_err(|err| {
                     format!(
-                        "La copia en el destino se verificó correctamente, pero no se pudo enviar el origen local a la Papelera: {err}."
+                        "La copia en el destino finalizó, pero no se pudo enviar el origen local a la Papelera: {err}."
                     )
                 })?;
                 Ok((
                     false,
                     true,
-                    "Respaldo verificado con xxHash3 al 100% y copia local enviada de forma segura a la Papelera de Reciclaje."
-                        .to_string(),
+                    format!("{verify_tag} Copia local enviada de forma segura a la Papelera de Reciclaje."),
                 ))
             } else {
                 if source.is_dir() {
@@ -494,14 +503,13 @@ fn apply_phase3_cleanup(
                 }
                 .map_err(|err| {
                     format!(
-                        "La copia en el destino se verificó correctamente, pero no se pudo liberar el origen local (puede estar en uso por otro programa): {err}."
+                        "La copia en el destino finalizó, pero no se pudo liberar el origen local (puede estar en uso por otro programa): {err}."
                     )
                 })?;
                 Ok((
                     false,
                     true,
-                    "Respaldo verificado con xxHash3 al 100% y espacio local liberado en tu PC."
-                        .to_string(),
+                    format!("{verify_tag} Espacio local liberado en tu PC."),
                 ))
             }
         }
@@ -526,7 +534,7 @@ fn apply_phase3_cleanup(
             // Paso atómico 1: apartar el original sin destruirlo todavía
             fs::rename(source, &backup_path).map_err(|err| {
                 format!(
-                    "Copia verificada en destino, pero no se pudo renombrar el origen local para crear el enlace (cierra programas que estén usando esta carpeta): {err}."
+                    "Copia completada en destino, pero no se pudo renombrar el origen local para crear el enlace (cierra programas que estén usando esta carpeta): {err}."
                 )
             })?;
 
@@ -535,7 +543,7 @@ fn apply_phase3_cleanup(
                 // Rollback inmediato: restaurar carpeta original exactamente como estaba
                 let _ = fs::rename(&backup_path, source);
                 return Err(format!(
-                    "{link_err} Se restauró tu carpeta local sin pérdidas; la copia verificada sigue guardada en el destino."
+                    "{link_err} Se restauró tu carpeta local sin pérdidas; la copia sigue guardada en el destino."
                 ));
             }
 
@@ -566,7 +574,7 @@ fn apply_phase3_cleanup(
 
             if let Err(rem_err) = remove_result {
                 return Err(format!(
-                    "El enlace transparente ya está activo y verificado, pero quedó la carpeta temporal '{}' pendiente de borrar: {rem_err}",
+                    "El enlace transparente ya está activo, pero quedó la carpeta temporal '{}' pendiente de borrar: {rem_err}",
                     backup_path.display()
                 ));
             }
@@ -574,8 +582,7 @@ fn apply_phase3_cleanup(
             Ok((
                 true,
                 true,
-                "Carpeta migrada con verificación xxHash3 al 100% y reemplazada por un enlace transparente."
-                    .to_string(),
+                format!("{verify_tag} Carpeta migrada y reemplazada por un enlace transparente."),
             ))
         }
     }
@@ -780,70 +787,15 @@ pub fn execute_safe_transfer(
     }
 
     // ==================== FASE 2: VERIFICACIÓN DE INTEGRIDAD xxHash3 ====================
-    let verify_started = Instant::now();
-    let mut last_verify_emit = Instant::now();
+    // Si el usuario eligió mover sin escaneo (`skip_verification = true`), se salta este paso.
+    if !request.skip_verification {
+        let verify_started = Instant::now();
+        let mut last_verify_emit = Instant::now();
 
-    emit_progress(TransferProgress {
-        phase: TransferPhase::Verifying,
-        paused: false,
-        current_file: "Iniciando verificación xxHash3...".to_string(),
-        files_completed: 0,
-        files_total,
-        bytes_processed: 0,
-        total_bytes,
-        speed_bytes_per_sec: 0.0,
-        eta_seconds: None,
-        percent: 0.0,
-        retries_count,
-    });
-
-    if let Err(err) =
-        verify_manifest_xxhash3(&manifest, &pause_flag, &cancel_flag, |rel, done, bytes| {
-            if last_verify_emit.elapsed() >= Duration::from_millis(150) || done == files_total {
-                let elapsed_secs = verify_started.elapsed().as_secs_f64().max(0.05);
-                let speed = bytes as f64 / elapsed_secs;
-                let remaining = total_bytes.saturating_sub(bytes);
-                let eta = if speed > 1.0 {
-                    Some((remaining as f64 / speed).ceil() as u64)
-                } else {
-                    None
-                };
-                let pct = if total_bytes > 0 {
-                    ((bytes as f64 / total_bytes as f64) * 100.0).min(100.0)
-                } else {
-                    100.0
-                };
-
-                emit_progress(TransferProgress {
-                    phase: TransferPhase::Verifying,
-                    paused: pause_flag.load(Ordering::Relaxed),
-                    current_file: rel.to_string(),
-                    files_completed: done,
-                    files_total,
-                    bytes_processed: bytes,
-                    total_bytes,
-                    speed_bytes_per_sec: speed,
-                    eta_seconds: eta,
-                    percent: (pct * 10.0).round() / 10.0,
-                    retries_count,
-                });
-                last_verify_emit = Instant::now();
-            }
-        })
-    {
-        let status = if cancel_flag.load(Ordering::Relaxed) {
-            "cancelled_source_intact"
-        } else {
-            "failed_source_intact"
-        };
         emit_progress(TransferProgress {
-            phase: if status == "cancelled_source_intact" {
-                TransferPhase::Cancelled
-            } else {
-                TransferPhase::Failed
-            },
+            phase: TransferPhase::Verifying,
             paused: false,
-            current_file: "Verificación detenida — origen local intacto".to_string(),
+            current_file: "Iniciando verificación xxHash3...".to_string(),
             files_completed: 0,
             files_total,
             bytes_processed: 0,
@@ -853,7 +805,74 @@ pub fn execute_safe_transfer(
             percent: 0.0,
             retries_count,
         });
-        return Err(fail(status, err, files_total, total_bytes));
+
+        if let Err(err) =
+            verify_manifest_xxhash3(&manifest, &pause_flag, &cancel_flag, |rel, done, bytes| {
+                if last_verify_emit.elapsed() >= Duration::from_millis(150) || done == files_total {
+                    let elapsed_secs = verify_started.elapsed().as_secs_f64().max(0.05);
+                    let speed = bytes as f64 / elapsed_secs;
+                    let remaining = total_bytes.saturating_sub(bytes);
+                    let eta = if speed > 1.0 {
+                        Some((remaining as f64 / speed).ceil() as u64)
+                    } else {
+                        None
+                    };
+                    let pct = if total_bytes > 0 {
+                        ((bytes as f64 / total_bytes as f64) * 100.0).min(100.0)
+                    } else {
+                        100.0
+                    };
+
+                    emit_progress(TransferProgress {
+                        phase: TransferPhase::Verifying,
+                        paused: pause_flag.load(Ordering::Relaxed),
+                        current_file: rel.to_string(),
+                        files_completed: done,
+                        files_total,
+                        bytes_processed: bytes,
+                        total_bytes,
+                        speed_bytes_per_sec: speed,
+                        eta_seconds: eta,
+                        percent: (pct * 10.0).round() / 10.0,
+                        retries_count,
+                    });
+                    last_verify_emit = Instant::now();
+                }
+            })
+        {
+            let is_cancelled = cancel_flag.load(Ordering::Relaxed);
+            let status = if is_cancelled {
+                "cancelled_source_intact"
+            } else {
+                "failed_source_intact"
+            };
+            emit_progress(TransferProgress {
+                phase: if is_cancelled {
+                    TransferPhase::Cancelled
+                } else {
+                    TransferPhase::Failed
+                },
+                paused: false,
+                current_file: "Verificación detenida — origen local intacto".to_string(),
+                files_completed: 0,
+                files_total,
+                bytes_processed: 0,
+                total_bytes,
+                speed_bytes_per_sec: 0.0,
+                eta_seconds: None,
+                percent: 0.0,
+                retries_count,
+            });
+
+            // Prefijo estructurado para permitir que la interfaz consulte al usuario si desea
+            // ignorar la advertencia del Paso 2 y continuar, o detenerse aquí.
+            let final_err = if is_cancelled {
+                err
+            } else {
+                format!("PHASE2_WARNING: {err}")
+            };
+            return Err(fail(status, final_err, files_total, total_bytes));
+        }
     }
 
     // ==================== FASE 3: LIMPIEZA LOCAL CONDICIONADA ====================
@@ -871,9 +890,14 @@ pub fn execute_safe_transfer(
         retries_count,
     });
 
-    let (symlink_created, local_space_freed, summary_message) =
-        apply_phase3_cleanup(source, &final_dest, request.mode, request.send_local_to_trash)
-            .map_err(|err| fail("failed_source_intact", err, files_total, total_bytes))?;
+    let (symlink_created, local_space_freed, summary_message) = apply_phase3_cleanup(
+        source,
+        &final_dest,
+        request.mode,
+        request.send_local_to_trash,
+        request.skip_verification,
+    )
+    .map_err(|err| fail("failed_source_intact", err, files_total, total_bytes))?;
 
     let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -897,9 +921,98 @@ pub fn execute_safe_transfer(
         mode: request.mode,
         files_count: files_total,
         total_bytes,
-        status: "verified_completed".to_string(),
+        status: if request.skip_verification {
+            "completed_unverified".to_string()
+        } else {
+            "verified_completed".to_string()
+        },
         duration_ms,
         retries_count,
+        symlink_created,
+        local_space_freed,
+        summary_message,
+    })
+}
+
+/// Finaliza la Fase 3 cuando el usuario decidió explícitamente ignorar una advertencia del Paso 2
+/// (xxHash3) sobre archivos que ya fueron copiados al destino en la Fase 1.
+pub fn finalize_transfer_without_verification(
+    request: &TransferRequest,
+    app_handle: Option<AppHandle>,
+) -> Result<TransferResult, String> {
+    let started = Instant::now();
+    let source = Path::new(request.source_path.trim());
+    let dest_root = Path::new(request.dest_root.trim());
+
+    security::ensure_path_is_not_protected(source)?;
+    if !source.exists() {
+        return Err(format!("La ruta de origen ya no existe: '{}'.", source.display()));
+    }
+
+    let (source_name, final_dest) = resolve_final_destination(source, dest_root)?;
+    if !final_dest.exists() {
+        return Err(format!(
+            "No se encontró la copia previa en '{}'. Vuelve a iniciar la transferencia.",
+            final_dest.display()
+        ));
+    }
+
+    let (manifest, _, total_bytes) = build_manifest(source, &final_dest, None)?;
+    let files_total = manifest.len() as u64;
+
+    let emit_progress = |payload: TransferProgress| {
+        if let Some(ref handle) = app_handle {
+            let _ = handle.emit("transfer-progress", payload);
+        }
+    };
+
+    emit_progress(TransferProgress {
+        phase: TransferPhase::Cleaning,
+        paused: false,
+        current_file: source_name,
+        files_completed: files_total,
+        files_total,
+        bytes_processed: total_bytes,
+        total_bytes,
+        speed_bytes_per_sec: 0.0,
+        eta_seconds: Some(0),
+        percent: 100.0,
+        retries_count: 0,
+    });
+
+    let (symlink_created, local_space_freed, summary_message) = apply_phase3_cleanup(
+        source,
+        &final_dest,
+        request.mode,
+        request.send_local_to_trash,
+        true,
+    )?;
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    emit_progress(TransferProgress {
+        phase: TransferPhase::Completed,
+        paused: false,
+        current_file: final_dest.to_string_lossy().to_string(),
+        files_completed: files_total,
+        files_total,
+        bytes_processed: total_bytes,
+        total_bytes,
+        speed_bytes_per_sec: 0.0,
+        eta_seconds: Some(0),
+        percent: 100.0,
+        retries_count: 0,
+    });
+
+    Ok(TransferResult {
+        source_path: source.to_string_lossy().to_string(),
+        dest_path: final_dest.to_string_lossy().to_string(),
+        mode: request.mode,
+        files_count: files_total,
+        total_bytes,
+        status: "completed_unverified".to_string(),
+        duration_ms,
+        retries_count: 0,
         symlink_created,
         local_space_freed,
         summary_message,
@@ -936,6 +1049,7 @@ mod tests {
             dest_root: dst_root.to_string_lossy().to_string(),
             mode: TransferMode::ArchiveFree,
             send_local_to_trash: false,
+            skip_verification: false,
         };
 
         let result = execute_safe_transfer(
@@ -952,6 +1066,41 @@ mod tests {
         assert!(!src_folder.exists(), "El origen debía liberarse tras verificar xxHash3");
         assert!(dst_root.join("Vacaciones").join("foto1.jpg").exists());
         assert!(dst_root.join("Vacaciones").join("Sub").join("video.mp4").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pipeline_sin_escaneo_salta_fase2_xxhash3_y_completa() {
+        let base = std::env::temp_dir().join(format!(
+            "diskvault_pipeline_skip_verify_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let src_folder = base.join("Origen").join("RespaldoRapido");
+        let dst_root = base.join("DestinoNAS");
+        fs::create_dir_all(&src_folder).unwrap();
+        fs::create_dir_all(&dst_root).unwrap();
+        fs::write(src_folder.join("archivo.bin"), vec![0x55u8; 4096]).unwrap();
+
+        let req = TransferRequest {
+            source_path: src_folder.to_string_lossy().to_string(),
+            dest_root: dst_root.to_string_lossy().to_string(),
+            mode: TransferMode::CopyBackup,
+            send_local_to_trash: false,
+            skip_verification: true,
+        };
+
+        let result = execute_safe_transfer(
+            &req,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .expect("La transferencia sin verificación debía completarse");
+
+        assert_eq!(result.status, "completed_unverified");
+        assert!(dst_root.join("RespaldoRapido").join("archivo.bin").exists());
 
         let _ = fs::remove_dir_all(&base);
     }

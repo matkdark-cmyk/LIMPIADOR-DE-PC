@@ -97,6 +97,10 @@ export async function invokeAdminElevation(currentRoute: AppRoute): Promise<void
   await invoke<void>('request_admin_elevation', { currentRoute });
 }
 
+export async function invokeDisableAdminMode(currentRoute: AppRoute): Promise<boolean> {
+  return invoke<boolean>('disable_admin_mode', { currentRoute });
+}
+
 export async function invokeSaveSetting(key: string, value: string): Promise<void> {
   await invoke<void>('save_setting', { key, value });
 }
@@ -226,6 +230,12 @@ export async function invokeStartSafeTransfer(
   request: TransferRequest,
 ): Promise<TransferResult> {
   return invoke<TransferResult>('start_safe_transfer', { request });
+}
+
+export async function invokeFinalizeTransferSkipVerification(
+  request: TransferRequest,
+): Promise<TransferResult> {
+  return invoke<TransferResult>('finalize_transfer_skip_verification', { request });
 }
 
 export async function invokePauseTransfer(): Promise<void> {

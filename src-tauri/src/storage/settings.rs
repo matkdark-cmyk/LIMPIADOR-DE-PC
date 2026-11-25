@@ -12,6 +12,7 @@ const KEY_RAM_EXCLUDED: &str = "ram_excluded_processes";
 const KEY_CLEANER_EXCLUDED: &str = "cleaner_excluded_paths";
 const KEY_NAS_DEFAULT_MODE: &str = "nas_default_mode";
 const KEY_START_WITH_WINDOWS: &str = "start_with_windows";
+const KEY_ALWAYS_RUN_AS_ADMIN: &str = "always_run_as_admin";
 
 /// Configuración consolidada de DiskVault Clean persistida en la tabla `settings` de SQLite.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,6 +26,12 @@ pub struct AppSettings {
     pub cleaner_excluded_paths: Vec<String>,
     pub nas_default_mode: String,
     pub start_with_windows: bool,
+    #[serde(default = "default_always_run_as_admin")]
+    pub always_run_as_admin: bool,
+}
+
+fn default_always_run_as_admin() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -38,6 +45,7 @@ impl Default for AppSettings {
             cleaner_excluded_paths: Vec::new(),
             nas_default_mode: "archive_free".to_string(),
             start_with_windows: false,
+            always_run_as_admin: true,
         }
     }
 }
@@ -147,6 +155,11 @@ pub fn load_settings_from_db(db: &Database, is_portable: bool) -> AppSettings {
         defaults.start_with_windows,
     );
 
+    let always_run_as_admin = parse_bool(
+        db.get_setting(KEY_ALWAYS_RUN_AS_ADMIN).ok().flatten(),
+        defaults.always_run_as_admin,
+    );
+
     AppSettings {
         theme,
         default_use_recycle_bin,
@@ -156,6 +169,7 @@ pub fn load_settings_from_db(db: &Database, is_portable: bool) -> AppSettings {
         cleaner_excluded_paths,
         nas_default_mode,
         start_with_windows,
+        always_run_as_admin,
     }
     .sanitized(is_portable)
 }
@@ -197,6 +211,14 @@ pub fn save_settings_to_db(
     db.save_setting(
         KEY_START_WITH_WINDOWS,
         if clean.start_with_windows {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    db.save_setting(
+        KEY_ALWAYS_RUN_AS_ADMIN,
+        if clean.always_run_as_admin {
             "true"
         } else {
             "false"
@@ -429,6 +451,7 @@ mod tests {
         assert!(loaded_default.confirm_before_permanent_delete);
         assert_eq!(loaded_default.nas_default_mode, "archive_free");
         assert!(!loaded_default.start_with_windows);
+        assert!(loaded_default.always_run_as_admin);
         assert!(loaded_default.ram_excluded_processes.is_empty());
         assert!(loaded_default.cleaner_excluded_paths.is_empty());
 
@@ -441,12 +464,14 @@ mod tests {
             cleaner_excluded_paths: vec![r"C:\Temp\MiCacheImportante".to_string()],
             nas_default_mode: "move_symlink".to_string(),
             start_with_windows: true,
+            always_run_as_admin: false,
         };
 
         let saved = save_settings_to_db(&db, custom, false).expect("debe guardar ajustes");
         assert_eq!(saved.theme, "dark");
         assert_eq!(saved.default_inactive_days, 60);
         assert!(saved.start_with_windows);
+        assert!(!saved.always_run_as_admin);
 
         let reloaded = load_settings_from_db(&db, false);
         assert_eq!(reloaded, saved);

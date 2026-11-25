@@ -299,6 +299,7 @@ pub async fn execute_relocate_app(
         dest_root: dest_parent_dir.trim().to_string(),
         mode: TransferMode::MoveSymlink,
         send_local_to_trash: false,
+        skip_verification: false,
     };
 
     let req_clone = request.clone();

@@ -28,6 +28,7 @@ export interface AppSettings {
   cleanerExcludedPaths: string[];
   nasDefaultMode: 'archive_free' | 'move_symlink' | 'copy_backup';
   startWithWindows: boolean;
+  alwaysRunAsAdmin: boolean;
 }
 
 export interface AppStatus {

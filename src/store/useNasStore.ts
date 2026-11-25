@@ -15,6 +15,7 @@ import {
   fetchTransferHistory,
   invokeCancelTransfer,
   invokeDeleteNasTarget,
+  invokeFinalizeTransferSkipVerification,
   invokePauseTransfer,
   invokePreviewTransferSource,
   invokeRecordThreatDecision,
@@ -65,6 +66,10 @@ interface NasStoreState {
   pendingThreatReport: ThreatScanReport | null;
   stoppedThreatReport: ThreatScanReport | null;
 
+  activeSkipVerification: boolean;
+  pendingPhase2Warning: string | null;
+  isFinalizingPhase2Skip: boolean;
+
   isTransferring: boolean;
   isPaused: boolean;
   transferProgress: TransferProgress | null;
@@ -94,9 +99,11 @@ interface NasStoreState {
   closeScanPrompt: () => void;
   confirmTransferWithVirusScan: () => Promise<void>;
   confirmTransferWithoutVirusScan: () => Promise<void>;
-  startTransfer: (bypassThreatWarning?: boolean) => Promise<void>;
+  startTransfer: (bypassThreatWarning?: boolean, skipVerification?: boolean) => Promise<void>;
   stopTransferDueToThreats: () => Promise<void>;
   acceptThreatsAndContinue: () => Promise<void>;
+  stopTransferAfterPhase2Warning: () => void;
+  ignorePhase2WarningAndContinue: () => Promise<void>;
   clearStoppedThreatReport: () => void;
   togglePauseTransfer: () => Promise<void>;
   cancelTransfer: () => Promise<void>;
@@ -127,6 +134,10 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
   isScanningThreats: false,
   pendingThreatReport: null,
   stoppedThreatReport: null,
+
+  activeSkipVerification: false,
+  pendingPhase2Warning: null,
+  isFinalizingPhase2Skip: false,
 
   isTransferring: false,
   isPaused: false,
@@ -384,15 +395,16 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
 
   confirmTransferWithVirusScan: async () => {
     set({ isScanPromptOpen: false });
-    await get().startTransfer(false);
+    await get().startTransfer(false, false);
   },
 
   confirmTransferWithoutVirusScan: async () => {
     set({ isScanPromptOpen: false });
-    await get().startTransfer(true);
+    // Si el usuario elige mover al NAS sin escaneo, se omite también el Paso 2 automático (xxHash3)
+    await get().startTransfer(true, true);
   },
 
-  startTransfer: async (bypassThreatWarning = false) => {
+  startTransfer: async (bypassThreatWarning = false, skipVerification = false) => {
     const { sourcePath, destRoot, mode, sendLocalToTrash, isTransferring, isScanningThreats } =
       get();
     if (isTransferring || isScanningThreats) {
@@ -421,6 +433,7 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
         isScanningThreats: true,
         pendingThreatReport: null,
         stoppedThreatReport: null,
+        pendingPhase2Warning: null,
         lastTransferError: null,
       });
 
@@ -447,8 +460,10 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
     set({
       isTransferring: true,
       isPaused: false,
+      activeSkipVerification: skipVerification,
       pendingThreatReport: null,
       stoppedThreatReport: null,
+      pendingPhase2Warning: null,
       lastTransferResult: null,
       lastTransferError: null,
       transferProgress: {
@@ -472,6 +487,7 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
         destRoot: destRoot.trim(),
         mode,
         sendLocalToTrash,
+        skipVerification,
       });
 
       set({
@@ -491,13 +507,36 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
       void useAppStore.getState().refreshAuditLogs(5);
 
       useAppStore.getState().addToast({
-        title: 'Migración verificada con xxHash3',
+        title:
+          result.status === 'verified_completed'
+            ? 'Migración verificada con xxHash3'
+            : 'Migración completada',
         message: result.summaryMessage,
         variant: 'success',
         durationMs: 6500,
       });
     } catch (err) {
       const message = extractError(err);
+
+      // Si el Paso 2 (xxHash3) detectó una advertencia/diferencia, consultar al usuario si desea
+      // ignorar la advertencia y continuar con el proceso o dejarlo hasta aquí.
+      if (message.startsWith('PHASE2_WARNING:')) {
+        const cleanWarning = message.replace(/^PHASE2_WARNING:\s*/i, '').trim();
+        set({
+          isTransferring: false,
+          isPaused: false,
+          lastTransferResult: null,
+          lastTransferError: null,
+          pendingPhase2Warning:
+            cleanWarning ||
+            'Se detectó una diferencia o advertencia durante el Paso 2 (verificación xxHash3).',
+        });
+
+        void get().loadTargetsAndHistory();
+        void useAppStore.getState().refreshAuditLogs(5);
+        return;
+      }
+
       const isCancelled = message.toLowerCase().includes('cancel');
       set({
         isTransferring: false,
@@ -587,7 +626,80 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
       }
     }
 
-    await get().startTransfer(true);
+    // Si el usuario acepta continuar pese a la advertencia de amenaza, sigue con el proceso normal;
+    // si luego el Paso 2 (xxHash3) detecta una advertencia, volverá a consultarle.
+    await get().startTransfer(true, false);
+  },
+
+  stopTransferAfterPhase2Warning: () => {
+    const warning = get().pendingPhase2Warning;
+    set({
+      pendingPhase2Warning: null,
+      lastTransferError:
+        warning ??
+        'Proceso detenido por el usuario tras la advertencia del Paso 2 (xxHash3). Tu carpeta original sigue 100% intacta.',
+    });
+
+    useAppStore.getState().addToast({
+      title: 'Proceso detenido por seguridad',
+      message:
+        'Se aceptó la advertencia del Paso 2 (xxHash3) y no se continuó con el proceso. Tu carpeta original sigue 100% intacta.',
+      variant: 'warning',
+      durationMs: 7500,
+    });
+  },
+
+  ignorePhase2WarningAndContinue: async () => {
+    const { sourcePath, destRoot, mode, sendLocalToTrash, isFinalizingPhase2Skip } = get();
+    if (isFinalizingPhase2Skip || !isTauriRuntime()) {
+      return;
+    }
+
+    set({ isFinalizingPhase2Skip: true });
+    try {
+      const result = await invokeFinalizeTransferSkipVerification({
+        sourcePath: sourcePath.trim(),
+        destRoot: destRoot.trim(),
+        mode,
+        sendLocalToTrash,
+        skipVerification: true,
+      });
+
+      set({
+        isFinalizingPhase2Skip: false,
+        pendingPhase2Warning: null,
+        activeSkipVerification: true,
+        lastTransferResult: result,
+        lastTransferError: null,
+        preflight: null,
+      });
+
+      useScannerStore.getState().clearPendingNasSourcePath();
+      void get().loadTargetsAndHistory();
+      void useScannerStore.getState().loadSystemOverview(true);
+      void useAppStore.getState().refreshAuditLogs(5);
+
+      useAppStore.getState().addToast({
+        title: 'Proceso completado (advertencia Paso 2 omitida)',
+        message: result.summaryMessage,
+        variant: 'success',
+        durationMs: 6500,
+      });
+    } catch (err) {
+      const message = extractError(err);
+      set({
+        isFinalizingPhase2Skip: false,
+        pendingPhase2Warning: null,
+        lastTransferError: message,
+      });
+
+      useAppStore.getState().addToast({
+        title: 'No se pudo finalizar el proceso',
+        message,
+        variant: 'error',
+        durationMs: 7500,
+      });
+    }
   },
 
   clearStoppedThreatReport: () => set({ stoppedThreatReport: null }),

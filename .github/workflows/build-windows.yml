@@ -15,7 +15,7 @@ on:
         default: true
         type: boolean
       release_notes:
-        description: 'Detalle de novedades que verán los usuarios en la ventana de actualización'
+        description: 'Detalle de novedades personalizado (opcional; si se deja vacío usa RELEASE_NOTES.md)'
         required: false
         default: ''
         type: string
@@ -62,7 +62,7 @@ jobs:
             npm install
           }
 
-      - name: Detectar versión desde tauri.conf.json
+      - name: Detectar versión y notas de actualización
         id: meta
         shell: pwsh
         run: |
@@ -70,6 +70,17 @@ jobs:
           $ver = [string]$conf.version
           "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          $customNotes = $env:CUSTOM_RELEASE_NOTES
+          if (-not [string]::IsNullOrWhiteSpace($customNotes)) {
+            Set-Content -Path 'release_notes_resolved.md' -Value $customNotes -Encoding UTF8
+          } elseif (Test-Path 'RELEASE_NOTES.md') {
+            Copy-Item -Path 'RELEASE_NOTES.md' -Destination 'release_notes_resolved.md' -Force
+          } else {
+            Set-Content -Path 'release_notes_resolved.md' -Value "Actualización oficial DiskVault Clean v$ver para Windows x64." -Encoding UTF8
+          }
+        env:
+          CUSTOM_RELEASE_NOTES: ${{ inputs.release_notes }}
 
       - name: Compilar y empaquetar Instalador .exe y Portable .zip
         shell: pwsh
@@ -91,14 +102,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publicar GitHub Release automático (tags v* o activado manualmente)
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release == true
+      - name: Publicar GitHub Release automático para el auto-actualizador
+        if: github.event_name != 'workflow_dispatch' || inputs.publish_release != false
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.meta.outputs.tag }}
           name: DiskVault Clean ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.meta.outputs.tag }}
-          body: ${{ inputs.release_notes }}
-          generate_release_notes: ${{ inputs.release_notes == '' }}
+          body_path: release_notes_resolved.md
+          make_latest: true
+          fail_on_unmatched_files: true
           files: |
             release/DiskVaultClean_v*_Setup_x64.exe
             release/DiskVaultClean_v*_Portable_x64.zip

@@ -47,6 +47,7 @@ export interface TransferRequest {
   destRoot: string;
   mode: TransferMode;
   sendLocalToTrash: boolean;
+  skipVerification?: boolean;
 }
 
 export interface TransferProgress {

@@ -447,10 +447,11 @@ export function TransferWizard() {
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
           <span>
             <strong className="font-semibold text-slate-800 dark:text-slate-200">
-              Escaneo antivirus opcional y cero pérdida:
+              Escaneo antivirus y Paso 2 (xxHash3) bajo tu control:
             </strong>{' '}
-            al iniciar te preguntaremos si deseas analizar los archivos en busca de virus o
-            copiarlos directamente al disco de respaldo o NAS, siempre verificados con xxHash3.
+            al iniciar te preguntaremos si deseas escanear antes de copiar (incluye Paso 2 xxHash3)
+            o copiar directamente saltando el escaneo y el Paso 2. Ante cualquier advertencia,
+            siempre podrás decidir si continuar o detener el proceso.
           </span>
         </div>
 

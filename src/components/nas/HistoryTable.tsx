@@ -31,6 +31,14 @@ function TransferStatusBadge({
       </span>
     );
   }
+  if (status === 'completed_unverified') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700 whitespace-nowrap dark:text-blue-400">
+        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+        <span>Completado (sin Paso 2)</span>
+      </span>
+    );
+  }
   if (status === 'cancelled_source_intact') {
     return (
       <span
@@ -166,7 +174,8 @@ export function HistoryTable() {
                     />
                   </td>
                   <td className="px-6 py-3 text-right whitespace-nowrap">
-                    {item.status === 'verified_completed' ? (
+                    {item.status === 'verified_completed' ||
+                    item.status === 'completed_unverified' ? (
                       <button
                         type="button"
                         onClick={() => void openInExplorer(item.destPath)}

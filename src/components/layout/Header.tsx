@@ -4,6 +4,7 @@ import {
   Loader2,
   Monitor,
   Moon,
+  PowerOff,
   Shield,
   ShieldCheck,
   Sun,
@@ -37,6 +38,7 @@ export function Header() {
   const isSavingSettings = useAppStore((state) => state.isSavingSettings);
   const setThemeMode = useAppStore((state) => state.setThemeMode);
   const requestAdminElevation = useAppStore((state) => state.requestAdminElevation);
+  const disableAdminMode = useAppStore((state) => state.disableAdminMode);
   const updateInfo = useUpdaterStore((state) => state.updateInfo);
   const openUpdateModal = useUpdaterStore((state) => state.openUpdateModal);
 
@@ -81,19 +83,35 @@ export function Header() {
         )}
 
         {isAdmin ? (
-          <div
-            title="DiskVault Clean está ejecutándose con privilegios de Administrador de Windows"
-            className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 whitespace-nowrap shrink-0 dark:border-emerald-800/70 dark:bg-emerald-950/50 dark:text-emerald-300"
-          >
-            <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-            <span>Modo Administrador</span>
+          <div className="inline-flex shrink-0 items-center overflow-hidden rounded-lg border border-emerald-200 bg-emerald-50 dark:border-emerald-800/70 dark:bg-emerald-950/50">
+            <div
+              title="Modo Administrador activo en cada sesión hasta que decidas desactivarlo"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-700 whitespace-nowrap dark:text-emerald-300"
+            >
+              <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              <span>Modo Administrador</span>
+            </div>
+            <button
+              type="button"
+              disabled={isElevating}
+              onClick={() => void disableAdminMode()}
+              title="Desactivar Modo Administrador y reiniciar en modo estándar"
+              className="inline-flex items-center gap-1 border-l border-emerald-200/90 px-2.5 py-1.5 text-xs font-medium text-emerald-800 transition-colors hover:bg-emerald-100 disabled:opacity-50 whitespace-nowrap dark:border-emerald-800/70 dark:text-emerald-200 dark:hover:bg-emerald-900/60"
+            >
+              {isElevating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+              ) : (
+                <PowerOff className="h-3.5 w-3.5 shrink-0" />
+              )}
+              <span>Desactivar</span>
+            </button>
           </div>
         ) : (
           <button
             type="button"
             disabled={isElevating}
             onClick={() => void requestAdminElevation()}
-            title="Solicitar permisos de Administrador de Windows (UAC) manteniendo la vista actual"
+            title="Activar Modo Administrador (permanecerá activo en cada sesión hasta que lo desactives)"
             className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 transition-colors duration-150 hover:bg-amber-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600 disabled:cursor-not-allowed disabled:opacity-60 whitespace-nowrap shrink-0 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200 dark:hover:bg-amber-500/25"
           >
             {isElevating ? (
@@ -102,7 +120,7 @@ export function Header() {
               <Shield className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
             )}
             <span>
-              {isElevating ? 'Solicitando...' : 'Modo Administrador'}
+              {isElevating ? 'Activando...' : 'Activar Modo Administrador'}
             </span>
           </button>
         )}
