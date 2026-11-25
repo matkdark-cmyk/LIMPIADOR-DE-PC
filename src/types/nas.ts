@@ -89,3 +89,25 @@ export interface TransferHistoryEntry {
   errorMessage: string | null;
   durationMs: number;
 }
+
+export type ThreatSeverity = 'malware' | 'suspicious';
+
+export interface ThreatFinding {
+  filePath: string;
+  fileName: string;
+  severity: ThreatSeverity;
+  engine: string;
+  threatName: string;
+  reason: string;
+}
+
+export interface ThreatScanReport {
+  sourcePath: string;
+  filesScanned: number;
+  defenderUsed: boolean;
+  defenderNote: string | null;
+  findings: ThreatFinding[];
+  hasThreats: boolean;
+  durationMs: number;
+}
+

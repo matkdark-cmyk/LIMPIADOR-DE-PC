@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   NasConnectionStatus,
   NasTarget,
+  ThreatScanReport,
   TransferHistoryEntry,
   TransferMode,
   TransferPreflight,
@@ -16,8 +17,10 @@ import {
   invokeDeleteNasTarget,
   invokePauseTransfer,
   invokePreviewTransferSource,
+  invokeRecordThreatDecision,
   invokeResumeTransfer,
   invokeSaveNasTarget,
+  invokeScanTransferThreats,
   invokeStartSafeTransfer,
   invokeTestNasConnection,
   isTauriRuntime,
@@ -57,6 +60,10 @@ interface NasStoreState {
   isCheckingPreflight: boolean;
   preflightError: string | null;
 
+  isScanningThreats: boolean;
+  pendingThreatReport: ThreatScanReport | null;
+  stoppedThreatReport: ThreatScanReport | null;
+
   isTransferring: boolean;
   isPaused: boolean;
   transferProgress: TransferProgress | null;
@@ -82,7 +89,10 @@ interface NasStoreState {
   pickDestFolder: () => Promise<void>;
   runPreflight: () => Promise<void>;
 
-  startTransfer: () => Promise<void>;
+  startTransfer: (bypassThreatWarning?: boolean) => Promise<void>;
+  stopTransferDueToThreats: () => Promise<void>;
+  acceptThreatsAndContinue: () => Promise<void>;
+  clearStoppedThreatReport: () => void;
   togglePauseTransfer: () => Promise<void>;
   cancelTransfer: () => Promise<void>;
   setTransferProgress: (progress: TransferProgress) => void;
@@ -107,6 +117,10 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
   preflight: null,
   isCheckingPreflight: false,
   preflightError: null,
+
+  isScanningThreats: false,
+  pendingThreatReport: null,
+  stoppedThreatReport: null,
 
   isTransferring: false,
   isPaused: false,
@@ -249,7 +263,12 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
   },
 
   setSourcePath: (path) =>
-    set({ sourcePath: path, preflight: null, preflightError: null }),
+    set({
+      sourcePath: path,
+      preflight: null,
+      preflightError: null,
+      stoppedThreatReport: null,
+    }),
 
   setDestRoot: (path) =>
     set({ destRoot: path, preflight: null, preflightError: null }),
@@ -331,9 +350,10 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
     }
   },
 
-  startTransfer: async () => {
-    const { sourcePath, destRoot, mode, sendLocalToTrash, isTransferring } = get();
-    if (isTransferring) {
+  startTransfer: async (bypassThreatWarning = false) => {
+    const { sourcePath, destRoot, mode, sendLocalToTrash, isTransferring, isScanningThreats } =
+      get();
+    if (isTransferring || isScanningThreats) {
       return;
     }
     if (!sourcePath.trim() || !destRoot.trim()) {
@@ -353,9 +373,40 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
       return;
     }
 
+    // Fase de seguridad previa: detectar virus o archivos sospechosos antes de copiar al disco o NAS
+    if (!bypassThreatWarning) {
+      set({
+        isScanningThreats: true,
+        pendingThreatReport: null,
+        stoppedThreatReport: null,
+        lastTransferError: null,
+      });
+
+      try {
+        const threatReport = await invokeScanTransferThreats(sourcePath.trim());
+        set({ isScanningThreats: false });
+
+        if (threatReport.hasThreats && threatReport.findings.length > 0) {
+          set({ pendingThreatReport: threatReport });
+          return;
+        }
+      } catch (err) {
+        set({ isScanningThreats: false });
+        useAppStore.getState().addToast({
+          title: 'No se pudo completar el análisis previo de seguridad',
+          message: extractError(err),
+          variant: 'error',
+          durationMs: 7000,
+        });
+        return;
+      }
+    }
+
     set({
       isTransferring: true,
       isPaused: false,
+      pendingThreatReport: null,
+      stoppedThreatReport: null,
       lastTransferResult: null,
       lastTransferError: null,
       transferProgress: {
@@ -426,6 +477,78 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
       });
     }
   },
+
+  stopTransferDueToThreats: async () => {
+    const { pendingThreatReport, sourcePath, destRoot } = get();
+    if (!pendingThreatReport) {
+      return;
+    }
+    const summary = pendingThreatReport.findings
+      .slice(0, 3)
+      .map((f) => `${f.fileName} (${f.threatName})`)
+      .join(', ');
+
+    set({
+      pendingThreatReport: null,
+      stoppedThreatReport: pendingThreatReport,
+    });
+
+    if (isTauriRuntime()) {
+      try {
+        await invokeRecordThreatDecision({
+          sourcePath: sourcePath.trim(),
+          destRoot: destRoot.trim(),
+          continuedByUser: false,
+          findingsCount: pendingThreatReport.findings.length,
+          summary,
+        });
+        void useAppStore.getState().refreshAuditLogs(5);
+      } catch {
+        // No bloquear al usuario si el registro secundario falla
+      }
+    }
+
+    useAppStore.getState().addToast({
+      title: 'Copiado detenido por seguridad',
+      message: `Se detectaron ${pendingThreatReport.findings.length} archivo(s) sospechosos o con riesgo. Revisa las rutas detalladas en pantalla antes de volver a intentar.`,
+      variant: 'warning',
+      durationMs: 8000,
+    });
+  },
+
+  acceptThreatsAndContinue: async () => {
+    const { pendingThreatReport, sourcePath, destRoot } = get();
+    if (!pendingThreatReport) {
+      return;
+    }
+    const summary = pendingThreatReport.findings
+      .slice(0, 3)
+      .map((f) => `${f.fileName} (${f.threatName})`)
+      .join(', ');
+
+    set({
+      pendingThreatReport: null,
+      stoppedThreatReport: null,
+    });
+
+    if (isTauriRuntime()) {
+      try {
+        await invokeRecordThreatDecision({
+          sourcePath: sourcePath.trim(),
+          destRoot: destRoot.trim(),
+          continuedByUser: true,
+          findingsCount: pendingThreatReport.findings.length,
+          summary,
+        });
+      } catch {
+        // Continuar incluso si falla el log
+      }
+    }
+
+    await get().startTransfer(true);
+  },
+
+  clearStoppedThreatReport: () => set({ stoppedThreatReport: null }),
 
   togglePauseTransfer: async () => {
     if (!get().isTransferring || !isTauriRuntime()) {

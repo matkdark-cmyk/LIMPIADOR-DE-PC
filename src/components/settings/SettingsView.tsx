@@ -16,6 +16,7 @@ import {
   Monitor,
   Moon,
   Plus,
+  RefreshCw,
   RotateCcw,
   Shield,
   ShieldCheck,
@@ -27,6 +28,7 @@ import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useAppStore } from '../../store/useAppStore';
 import { useCleanerStore } from '../../store/useCleanerStore';
 import { useNasStore } from '../../store/useNasStore';
+import { useUpdaterStore } from '../../store/useUpdaterStore';
 import type { InactiveDaysOption, ThemeMode, TransferMode } from '../../types';
 import { formatBytes, formatDateTime } from '../../utils/format';
 import { formatActionName, formatModuleName } from '../../utils/formatters';
@@ -94,6 +96,11 @@ export function SettingsView() {
   const refreshAuditLogs = useAppStore((s) => s.refreshAuditLogs);
   const setActiveRoute = useAppStore((s) => s.setActiveRoute);
   const addToast = useAppStore((s) => s.addToast);
+
+  const updateInfo = useUpdaterStore((s) => s.updateInfo);
+  const isCheckingUpdates = useUpdaterStore((s) => s.isChecking);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+  const openUpdateModal = useUpdaterStore((s) => s.openUpdateModal);
 
   const [newRamProcess, setNewRamProcess] = useState('');
   const [moduleFilter, setModuleFilter] = useState<string>('all');
@@ -935,22 +942,51 @@ export function SettingsView() {
             </p>
           </div>
 
-          <button
-            type="button"
-            disabled={isSavingSettings}
-            onClick={() => setResetModalOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 transition-colors hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-red-800 dark:hover:bg-red-950/50 dark:hover:text-red-300"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Restaurar ajustes por defecto
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {updateInfo?.updateAvailable ? (
+              <button
+                type="button"
+                onClick={openUpdateModal}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Ver actualización v{updateInfo.latestVersion}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={isCheckingUpdates}
+                onClick={() =>
+                  void checkForUpdates({ silent: false, openModalIfAvailable: true })
+                }
+                className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3.5 py-2 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-100 disabled:opacity-50 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-950/70"
+              >
+                {isCheckingUpdates ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                {isCheckingUpdates ? 'Buscando...' : 'Buscar actualizaciones'}
+              </button>
+            )}
+
+            <button
+              type="button"
+              disabled={isSavingSettings}
+              onClick={() => setResetModalOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 transition-colors hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-red-800 dark:hover:bg-red-950/50 dark:hover:text-red-300"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Restaurar ajustes por defecto
+            </button>
+          </div>
         </div>
 
         <div className="mt-5 grid grid-cols-1 gap-4 border-t border-slate-100 pt-5 sm:grid-cols-3 dark:border-slate-800">
           <div className="space-y-1">
             <p className="text-xs text-slate-500 dark:text-slate-400">Versión de DiskVault Clean</p>
             <p className="font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
-              v{appStatus?.appVersion ?? '1.0.0'}
+              v{appStatus?.appVersion ?? '1.1.0'}
             </p>
           </div>
 

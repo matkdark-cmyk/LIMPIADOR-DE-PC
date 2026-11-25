@@ -11,6 +11,7 @@ import type {
   FileNode,
   FileSection,
   InstalledApp,
+  InstallUpdateRequest,
   LeftoverCleanRequest,
   LeftoverCleanResult,
   LeftoverItem,
@@ -24,11 +25,13 @@ import type {
   ScanSummary,
   SystemOverview,
   ThemeMode,
+  ThreatScanReport,
   TransferHistoryEntry,
   TransferPreflight,
   TransferRequest,
   TransferResult,
   UninstallExecutionResult,
+  UpdateCheckResult,
 } from '../types';
 
 declare global {
@@ -202,6 +205,20 @@ export async function invokePreviewTransferSource(
     sourcePath,
     destRoot,
   });
+}
+
+export async function invokeScanTransferThreats(sourcePath: string): Promise<ThreatScanReport> {
+  return invoke<ThreatScanReport>('scan_transfer_threats', { sourcePath });
+}
+
+export async function invokeRecordThreatDecision(params: {
+  sourcePath: string;
+  destRoot: string;
+  continuedByUser: boolean;
+  findingsCount: number;
+  summary: string;
+}): Promise<void> {
+  await invoke<void>('record_threat_decision', params);
 }
 
 export async function invokeStartSafeTransfer(
@@ -390,5 +407,18 @@ export async function invokeClearOldAuditLogs(keepLastDays: number): Promise<num
 export async function invokeIsCriticalOperationRunning(): Promise<boolean> {
   return invoke<boolean>('is_critical_operation_running');
 }
+
+// ==================== IPC AUTO-ACTUALIZACIÓN (GITHUB RELEASES) ====================
+
+export async function invokeCheckForUpdates(): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>('check_for_updates');
+}
+
+export async function invokeDownloadAndInstallUpdate(
+  request: InstallUpdateRequest,
+): Promise<void> {
+  await invoke<void>('download_and_install_update', { request });
+}
+
 
 

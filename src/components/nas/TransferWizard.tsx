@@ -8,12 +8,15 @@ import {
   Loader2,
   Play,
   Shield,
+  ShieldAlert,
   ShieldCheck,
+  X,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { useNasStore } from '../../store/useNasStore';
 import type { TransferMode } from '../../types';
 import { formatBytes, formatNumber } from '../../utils/format';
+import { invokeOpenInExplorer, isTauriRuntime } from '../../utils/tauri';
 
 interface ModeOption {
   id: TransferMode;
@@ -64,6 +67,8 @@ export function TransferWizard() {
   const isCheckingPreflight = useNasStore((state) => state.isCheckingPreflight);
   const preflightError = useNasStore((state) => state.preflightError);
   const isTransferring = useNasStore((state) => state.isTransferring);
+  const isScanningThreats = useNasStore((state) => state.isScanningThreats);
+  const stoppedThreatReport = useNasStore((state) => state.stoppedThreatReport);
 
   const setSourcePath = useNasStore((state) => state.setSourcePath);
   const setDestRoot = useNasStore((state) => state.setDestRoot);
@@ -73,17 +78,35 @@ export function TransferWizard() {
   const pickDestFolder = useNasStore((state) => state.pickDestFolder);
   const runPreflight = useNasStore((state) => state.runPreflight);
   const startTransfer = useNasStore((state) => state.startTransfer);
+  const clearStoppedThreatReport = useNasStore((state) => state.clearStoppedThreatReport);
   const setActiveSubTab = useNasStore((state) => state.setActiveSubTab);
+  const addToast = useAppStore((state) => state.addToast);
 
   const isAdmin = appStatus?.isAdmin ?? false;
   const destLooksUnc = destRoot.trim().startsWith('\\\\') || destRoot.trim().startsWith('//');
   const needsAdminForUncSymlink = mode === 'move_symlink' && destLooksUnc && !isAdmin;
+  const isBusy = isTransferring || isScanningThreats;
 
   const canStart =
-    !isTransferring &&
+    !isBusy &&
     sourcePath.trim().length > 0 &&
     destRoot.trim().length > 0 &&
     (!preflight || (preflight.fitsInDestination && !preflight.destAlreadyExists));
+
+  const handleOpenThreatLocation = async (filePath: string) => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    try {
+      await invokeOpenInExplorer(filePath);
+    } catch (err) {
+      addToast({
+        title: 'No se pudo abrir la ubicación',
+        message: typeof err === 'string' ? err : 'No se pudo abrir el Explorador de Windows.',
+        variant: 'error',
+      });
+    }
+  };
 
   return (
     <section className="space-y-6 rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
@@ -348,23 +371,93 @@ export function TransferWizard() {
         </div>
       )}
 
+      {/* Detalle persistente cuando el usuario detuvo el copiado por virus/archivos sospechosos */}
+      {stoppedThreatReport && stoppedThreatReport.findings.length > 0 && (
+        <div className="space-y-3 rounded-xl border border-red-300 bg-red-50/70 p-4 text-xs dark:border-red-900/70 dark:bg-red-950/35">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
+              <div>
+                <p className="font-semibold text-red-900 dark:text-red-200">
+                  Copiado detenido por seguridad ({stoppedThreatReport.findings.length} hallazgo
+                  {stoppedThreatReport.findings.length === 1 ? '' : 's'})
+                </p>
+                <p className="mt-0.5 text-red-800/90 dark:text-red-300/90">
+                  No se copió ningún archivo al disco o NAS. Verifica las rutas encontradas a
+                  continuación antes de volver a intentar:
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={clearStoppedThreatReport}
+              aria-label="Ocultar aviso de seguridad"
+              className="rounded-md p-1 text-red-700 hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-900/50"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <ul className="max-h-56 space-y-2 overflow-y-auto pr-1">
+            {stoppedThreatReport.findings.map((item, index) => (
+              <li
+                key={`${item.filePath}-${index}`}
+                className="rounded-lg border border-red-200/80 bg-white/90 p-3 dark:border-red-900/60 dark:bg-slate-900/80"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
+                        item.severity === 'malware'
+                          ? 'bg-red-600 text-white'
+                          : 'bg-amber-600 text-white'
+                      }`}
+                    >
+                      {item.severity === 'malware' ? 'Virus / Amenaza' : 'Sospechoso'}
+                    </span>
+                    <span className="font-semibold text-slate-900 dark:text-slate-100">
+                      {item.threatName}
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      ({item.engine})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenThreatLocation(item.filePath)}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                    Abrir ubicación
+                  </button>
+                </div>
+                <p className="mt-1 text-slate-600 dark:text-slate-300">{item.reason}</p>
+                <p className="mt-1.5 rounded bg-slate-100 px-2 py-1 font-mono text-[11px] break-all text-slate-800 dark:bg-slate-950 dark:text-slate-200">
+                  {item.filePath}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* Garantía de seguridad + Botones de acción */}
       <div className="flex flex-col gap-4 border-t border-slate-100 pt-5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
         <div className="flex items-start gap-2.5 text-xs text-slate-600 dark:text-slate-400">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
           <span>
             <strong className="font-semibold text-slate-800 dark:text-slate-200">
-              Garantía cero pérdida:
+              Protección antivirus y cero pérdida:
             </strong>{' '}
-            si falla un solo archivo o hay diferencia de hash xxHash3, la operación se detiene y no
-            se elimina nada en tu PC.
+            analizamos tus archivos en busca de virus o archivos sospechosos antes de copiar y luego
+            verificamos cada archivo con hash xxHash3.
           </span>
         </div>
 
         <div className="flex shrink-0 items-center gap-2.5 self-end sm:self-auto">
           <button
             type="button"
-            disabled={isCheckingPreflight || isTransferring || !sourcePath.trim() || !destRoot.trim()}
+            disabled={isCheckingPreflight || isBusy || !sourcePath.trim() || !destRoot.trim()}
             onClick={() => void runPreflight()}
             className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
           >
@@ -382,8 +475,17 @@ export function TransferWizard() {
             onClick={() => void startTransfer()}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap dark:bg-blue-500 dark:hover:bg-blue-400"
           >
-            <Play className="h-3.5 w-3.5 fill-current" />
-            <span>Iniciar migración segura</span>
+            {isScanningThreats ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span>Analizando seguridad...</span>
+              </>
+            ) : (
+              <>
+                <Play className="h-3.5 w-3.5 fill-current" />
+                <span>Iniciar migración segura</span>
+              </>
+            )}
           </button>
         </div>
       </div>

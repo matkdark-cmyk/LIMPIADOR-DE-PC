@@ -87,6 +87,9 @@ export function formatActionName(actionKey: string): string {
     settings_reset: 'Ajustes restaurados',
     audit_exported: 'Historial exportado',
     audit_cleaned: 'Historial antiguo limpiado',
+    threat_scan_blocked: 'Copiado detenido por amenaza detectada',
+    threat_consent_accepted: 'Advertencia de amenaza omitida por usuario',
+    update_install_started: 'Actualización confirmada por usuario',
   };
   return labels[actionKey] ?? actionKey;
 }

@@ -26,6 +26,9 @@ export type {
 export type {
   NasConnectionStatus,
   NasTarget,
+  ThreatFinding,
+  ThreatScanReport,
+  ThreatSeverity,
   TransferHistoryEntry,
   TransferMode,
   TransferPhase,
@@ -75,4 +78,10 @@ export type {
   RamOptimizeResult,
   RamSnapshot,
 } from './ram';
+
+export type {
+  InstallUpdateRequest,
+  UpdateCheckResult,
+  UpdateProgressEvent,
+} from './updater';
 

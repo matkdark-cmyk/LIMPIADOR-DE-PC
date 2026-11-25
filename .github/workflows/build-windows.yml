@@ -9,6 +9,16 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      publish_release:
+        description: 'Publicar automáticamente como actualización en GitHub Releases'
+        required: false
+        default: true
+        type: boolean
+      release_notes:
+        description: 'Detalle de novedades que verán los usuarios en la ventana de actualización'
+        required: false
+        default: ''
+        type: string
       skip_tests:
         description: 'Omitir pruebas unitarias (compilación más rápida)'
         required: false
@@ -52,6 +62,15 @@ jobs:
             npm install
           }
 
+      - name: Detectar versión desde tauri.conf.json
+        id: meta
+        shell: pwsh
+        run: |
+          $conf = Get-Content -Path 'src-tauri/tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json
+          $ver = [string]$conf.version
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Compilar y empaquetar Instalador .exe y Portable .zip
         shell: pwsh
         run: |
@@ -72,12 +91,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publicar GitHub Release automático (si se subió un tag v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publicar GitHub Release automático (tags v* o activado manualmente)
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release == true
         uses: softprops/action-gh-release@v2
         with:
-          name: DiskVault Clean ${{ github.ref_name }}
-          generate_release_notes: true
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.meta.outputs.tag }}
+          name: DiskVault Clean ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.meta.outputs.tag }}
+          body: ${{ inputs.release_notes }}
+          generate_release_notes: ${{ inputs.release_notes == '' }}
           files: |
             release/DiskVaultClean_v*_Setup_x64.exe
             release/DiskVaultClean_v*_Portable_x64.zip

@@ -1,5 +1,14 @@
-import { HardDriveDownload, Loader2, Moon, Shield, ShieldCheck, Sun } from 'lucide-react';
+import {
+  ArrowDownCircle,
+  HardDriveDownload,
+  Loader2,
+  Moon,
+  Shield,
+  ShieldCheck,
+  Sun,
+} from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
+import { useUpdaterStore } from '../../store/useUpdaterStore';
 import { ROUTE_CATALOG } from '../../utils/formatters';
 
 export function Header() {
@@ -9,6 +18,8 @@ export function Header() {
   const resolvedTheme = useAppStore((state) => state.resolvedTheme);
   const toggleTheme = useAppStore((state) => state.toggleTheme);
   const requestAdminElevation = useAppStore((state) => state.requestAdminElevation);
+  const updateInfo = useUpdaterStore((state) => state.updateInfo);
+  const openUpdateModal = useUpdaterStore((state) => state.openUpdateModal);
 
   const meta = ROUTE_CATALOG[activeRoute];
   const isAdmin = appStatus?.isAdmin ?? false;
@@ -26,8 +37,20 @@ export function Header() {
         </p>
       </div>
 
-      {/* Controles de sesión: Portable, UAC y Tema */}
+      {/* Controles de sesión: Actualización, Portable, UAC y Tema */}
       <div className="flex shrink-0 items-center gap-3">
+        {updateInfo?.updateAvailable && (
+          <button
+            type="button"
+            onClick={openUpdateModal}
+            title="Ver detalles de la nueva actualización disponible antes de instalar"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-100 whitespace-nowrap shrink-0 dark:border-blue-500/40 dark:bg-blue-500/15 dark:text-blue-300 dark:hover:bg-blue-500/25"
+          >
+            <ArrowDownCircle className="h-4 w-4 shrink-0" />
+            <span>Actualizar a v{updateInfo.latestVersion}</span>
+          </button>
+        )}
+
         {isPortable && (
           <div
             title="Modo Portable activo: datos y configuración guardados junto al ejecutable en ./data/"

@@ -6,6 +6,7 @@ pub mod scanner;
 pub mod security;
 pub mod storage;
 pub mod uac;
+pub mod updater;
 
 use apps::inventory::{list_and_enrich_apps, AppsState, InstalledApp};
 use apps::relocator::{
@@ -27,6 +28,7 @@ use mover::pipeline::{
     TransferResult,
 };
 use mover::targets::{is_network_destination, test_nas_connection as run_nas_test, NasConnectionStatus};
+use mover::threat_scan::{scan_source_for_threats, ThreatScanReport};
 use ram::auto_monitor::{
     load_auto_config_from_db, save_auto_config_to_db, spawn_ram_auto_monitor, RamAutoConfig,
     RamAutoState,
@@ -51,6 +53,9 @@ use storage::settings::{
     AppSettings,
 };
 use tauri::{AppHandle, Manager, State};
+use updater::{
+    check_github_updates, download_and_apply_update, InstallUpdateRequest, UpdateCheckResult,
+};
 
 /// Estado compartido administrado por Tauri durante toda la sesión.
 pub struct AppState {
@@ -348,6 +353,50 @@ async fn preview_transfer_source(
     tokio::task::spawn_blocking(move || preflight_transfer(&source_path, &dest_root))
         .await
         .map_err(|err| format!("Error al calcular el tamaño previo de la transferencia: {err}"))?
+}
+
+#[tauri::command]
+async fn scan_transfer_threats(source_path: String) -> Result<ThreatScanReport, String> {
+    tokio::task::spawn_blocking(move || scan_source_for_threats(&source_path))
+        .await
+        .map_err(|err| format!("Error interno al analizar amenazas antes del copiado: {err}"))?
+}
+
+#[tauri::command]
+fn record_threat_decision(
+    state: State<'_, AppState>,
+    source_path: String,
+    dest_root: String,
+    continued_by_user: bool,
+    findings_count: usize,
+    summary: String,
+) -> Result<(), String> {
+    let action = if continued_by_user {
+        "threat_consent_accepted"
+    } else {
+        "threat_scan_blocked"
+    };
+    let status = if continued_by_user { "warning" } else { "info" };
+    let details = if continued_by_user {
+        format!(
+            "El usuario aceptó continuar bajo su responsabilidad omitiendo {findings_count} advertencia(s) de seguridad: {summary}"
+        )
+    } else {
+        format!(
+            "Copiado detenido por el usuario tras detectar {findings_count} elemento(s) de riesgo: {summary}"
+        )
+    };
+
+    state.db.record_audit_log(
+        "nas",
+        action,
+        Some(source_path.trim()),
+        Some(dest_root.trim()),
+        0,
+        status,
+        Some(&details),
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -952,6 +1001,44 @@ fn is_critical_operation_running(mover_state: State<'_, MoverState>) -> bool {
     mover_state.is_running.load(Ordering::SeqCst)
 }
 
+// ==================== COMANDOS DE AUTO-ACTUALIZACIÓN (GITHUB RELEASES) ====================
+
+#[tauri::command]
+async fn check_for_updates(state: State<'_, AppState>) -> Result<UpdateCheckResult, String> {
+    let is_portable = state.paths.is_portable;
+    tokio::task::spawn_blocking(move || check_github_updates(is_portable))
+        .await
+        .map_err(|err| format!("Error interno al comprobar actualizaciones: {err}"))?
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    request: InstallUpdateRequest,
+) -> Result<(), String> {
+    let is_portable = state.paths.is_portable;
+    let version = request.version.clone();
+
+    let _ = state.db.record_audit_log(
+        "system",
+        "update_install_started",
+        None,
+        Some(&request.asset_name),
+        0,
+        "info",
+        Some(&format!(
+            "El usuario confirmó la instalación de la actualización v{version}."
+        )),
+    );
+
+    tokio::task::spawn_blocking(move || {
+        download_and_apply_update(&app_handle, &request, is_portable)
+    })
+    .await
+    .map_err(|err| format!("Error interno al instalar la actualización: {err}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1026,6 +1113,8 @@ pub fn run() {
             delete_nas_target,
             test_nas_connection,
             preview_transfer_source,
+            scan_transfer_threats,
+            record_threat_decision,
             start_safe_transfer,
             pause_transfer,
             resume_transfer,
@@ -1054,6 +1143,8 @@ pub fn run() {
             export_audit_logs,
             clear_old_audit_logs,
             is_critical_operation_running,
+            check_for_updates,
+            download_and_install_update,
         ])
         .run(tauri::generate_context!())
         .expect("Error crítico al iniciar DiskVault Clean");

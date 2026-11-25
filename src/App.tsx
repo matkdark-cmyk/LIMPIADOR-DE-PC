@@ -8,6 +8,7 @@ import { CloseGuardModal } from './components/layout/CloseGuardModal';
 import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
 import { ToastContainer } from './components/layout/ToastContainer';
+import { UpdateDetailsModal } from './components/layout/UpdateDetailsModal';
 import { NasView } from './components/nas/NasView';
 import { RamView } from './components/ram/RamView';
 import { SettingsView } from './components/settings/SettingsView';
@@ -18,6 +19,7 @@ import { useRamAutoEventListener } from './hooks/useRamAutoEventListener';
 import { useScanProgressListener } from './hooks/useScanProgressListener';
 import { useThemeSystemSync } from './hooks/useThemeSystemSync';
 import { useTransferProgressListener } from './hooks/useTransferProgressListener';
+import { useUpdateListener } from './hooks/useUpdateListener';
 import { useWindowCloseGuard } from './hooks/useWindowCloseGuard';
 import { useAppStore } from './store/useAppStore';
 
@@ -29,6 +31,7 @@ export default function App() {
   useAppsMetadataListener();
   useCleanerProgressListener();
   useRamAutoEventListener();
+  useUpdateListener();
 
   const { isGuardOpen, isCancellingAndClosing, dismissGuard, cancelTransferAndExit } =
     useWindowCloseGuard();
@@ -74,6 +77,7 @@ export default function App() {
         onWait={dismissGuard}
         onCancelAndExit={() => void cancelTransferAndExit()}
       />
+      <UpdateDetailsModal />
       <ToastContainer />
     </div>
   );
