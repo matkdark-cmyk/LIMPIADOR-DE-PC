@@ -9,12 +9,14 @@ import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
 import { ToastContainer } from './components/layout/ToastContainer';
 import { UpdateDetailsModal } from './components/layout/UpdateDetailsModal';
+import { IncomingFileModal } from './components/nas/IncomingFileModal';
 import { NasView } from './components/nas/NasView';
 import { RamView } from './components/ram/RamView';
 import { SettingsView } from './components/settings/SettingsView';
 import { useAppInit } from './hooks/useAppInit';
 import { useAppsMetadataListener } from './hooks/useAppsMetadataListener';
 import { useCleanerProgressListener } from './hooks/useCleanerProgressListener';
+import { useIncomingFileListener } from './hooks/useIncomingFileListener';
 import { useRamAutoEventListener } from './hooks/useRamAutoEventListener';
 import { useScanProgressListener } from './hooks/useScanProgressListener';
 import { useThemeSystemSync } from './hooks/useThemeSystemSync';
@@ -32,6 +34,7 @@ export default function App() {
   useCleanerProgressListener();
   useRamAutoEventListener();
   useUpdateListener();
+  useIncomingFileListener();
 
   const { isGuardOpen, isCancellingAndClosing, dismissGuard, cancelTransferAndExit } =
     useWindowCloseGuard();
@@ -78,6 +81,7 @@ export default function App() {
         onCancelAndExit={() => void cancelTransferAndExit()}
       />
       <UpdateDetailsModal />
+      <IncomingFileModal />
       <ToastContainer />
     </div>
   );

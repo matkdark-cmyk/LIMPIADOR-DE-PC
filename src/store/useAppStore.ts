@@ -37,6 +37,9 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   nasDefaultMode: 'archive_free',
   startWithWindows: false,
   alwaysRunAsAdmin: true,
+  watchIncomingFiles: true,
+  watchMinSizeMb: 0,
+  watchedExtraFolders: [],
 };
 
 const DEFAULT_WINDOWS_THEME_INFO: WindowsThemeInfo = {

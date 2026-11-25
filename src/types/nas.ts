@@ -112,3 +112,34 @@ export interface ThreatScanReport {
   durationMs: number;
 }
 
+export interface IncomingFileEvent {
+  id: string;
+  path: string;
+  fileName: string;
+  originLabel: string;
+  isDir: boolean;
+  filesCount: number;
+  totalBytes: number;
+  detectedAt: string;
+  availableTargetsCount: number;
+  isTest: boolean;
+}
+
+export interface IncomingFileActionEvent {
+  id: string;
+  action: 'open_modal' | 'keep_pc';
+}
+
+export interface WatchedFolderEntry {
+  label: string;
+  path: string;
+  isDefault: boolean;
+  exists: boolean;
+}
+
+export interface WatchedFoldersInfo {
+  enabled: boolean;
+  minSizeMb: number;
+  folders: WatchedFolderEntry[];
+}
+

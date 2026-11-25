@@ -55,6 +55,7 @@ export function formatModuleName(moduleKey: string): string {
     analyzer: 'Explorador de Espacio',
     apps: 'Aplicaciones',
     nas: 'Mover al NAS',
+    watcher: 'Detector de Archivos',
     cleaner: 'Limpieza de Caché',
     ram: 'Memoria RAM',
   };
@@ -93,6 +94,8 @@ export function formatActionName(actionKey: string): string {
     threat_consent_accepted: 'Advertencia de amenaza omitida por usuario',
     phase2_warning_ignored: 'Advertencia del Paso 2 (xxHash3) omitida por usuario',
     update_install_started: 'Actualización confirmada por usuario',
+    incoming_file_kept_local: 'Archivo nuevo dejado solo en PC',
+    incoming_file_sent_to_nas: 'Archivo nuevo enviado al NAS',
   };
   return labels[actionKey] ?? actionKey;
 }

@@ -8,6 +8,7 @@ pub mod storage;
 pub mod theme;
 pub mod uac;
 pub mod updater;
+pub mod watcher;
 
 use apps::inventory::{list_and_enrich_apps, AppsState, InstalledApp};
 use apps::relocator::{
@@ -57,6 +58,10 @@ use tauri::{AppHandle, Manager, State};
 use theme::{read_windows_theme_info, resolve_tauri_window_theme, WindowsThemeInfo};
 use updater::{
     check_github_updates, download_and_apply_update, InstallUpdateRequest, UpdateCheckResult,
+};
+use watcher::{
+    spawn_incoming_file_watcher, trigger_test_incoming_notification, IncomingFileEvent,
+    WatchedFoldersInfo, WatcherState,
 };
 
 /// Estado compartido administrado por Tauri durante toda la sesión.
@@ -962,10 +967,13 @@ fn get_all_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
 #[tauri::command]
 fn update_all_settings(
     state: State<'_, AppState>,
+    watcher_state: State<'_, WatcherState>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
     let previous = load_settings_from_db(&state.db, state.paths.is_portable);
     let saved = save_settings_to_db(&state.db, settings, state.paths.is_portable)?;
+
+    watcher_state.update_from_settings(&saved);
 
     // Solo toca HKCU\...\Run en Modo Instalado y únicamente cuando cambia start_with_windows
     if !state.paths.is_portable && previous.start_with_windows != saved.start_with_windows {
@@ -980,9 +988,10 @@ fn update_all_settings(
         0,
         "ok",
         Some(&format!(
-            "Ajustes guardados (tema: {}, Papelera por defecto: {}, exclusiones RAM: {}, exclusiones caché: {}).",
+            "Ajustes guardados (tema: {}, Papelera por defecto: {}, detector automático: {}, exclusiones RAM: {}, exclusiones caché: {}).",
             saved.theme,
             if saved.default_use_recycle_bin { "sí" } else { "no" },
+            if saved.watch_incoming_files { "activo" } else { "inactivo" },
             saved.ram_excluded_processes.len(),
             saved.cleaner_excluded_paths.len(),
         )),
@@ -992,10 +1001,15 @@ fn update_all_settings(
 }
 
 #[tauri::command]
-fn reset_settings_to_default(state: State<'_, AppState>) -> Result<AppSettings, String> {
+fn reset_settings_to_default(
+    state: State<'_, AppState>,
+    watcher_state: State<'_, WatcherState>,
+) -> Result<AppSettings, String> {
     let previous = load_settings_from_db(&state.db, state.paths.is_portable);
     let defaults = AppSettings::default();
     let saved = save_settings_to_db(&state.db, defaults, state.paths.is_portable)?;
+
+    watcher_state.update_from_settings(&saved);
 
     if !state.paths.is_portable && previous.start_with_windows {
         let _ = sync_windows_autostart(false, state.paths.is_portable);
@@ -1171,6 +1185,54 @@ fn apply_native_window_theme(window: tauri::WebviewWindow, mode: String) -> Resu
         .map_err(|err| format!("No se pudo sincronizar el tema nativo de la ventana: {err}"))
 }
 
+// ==================== COMANDOS DE DETECTOR AUTOMÁTICO DE ARCHIVOS NUEVOS ====================
+
+#[tauri::command]
+fn get_watched_folders_info(
+    watcher_state: State<'_, WatcherState>,
+) -> Result<WatchedFoldersInfo, String> {
+    Ok(watcher_state.get_watched_folders_info())
+}
+
+#[tauri::command]
+fn respond_incoming_file_decision(
+    state: State<'_, AppState>,
+    source_path: String,
+    dest_root: Option<String>,
+    copied_to_nas: bool,
+    total_bytes: u64,
+) -> Result<(), String> {
+    let action = if copied_to_nas {
+        "incoming_file_sent_to_nas"
+    } else {
+        "incoming_file_kept_local"
+    };
+    let details = if copied_to_nas {
+        format!(
+            "El usuario eligió copiar el archivo/carpeta detectado directamente hacia '{}'.",
+            dest_root.as_deref().unwrap_or("NAS")
+        )
+    } else {
+        "El usuario eligió conservar el archivo/carpeta detectado solo en este PC.".to_string()
+    };
+
+    state.db.record_audit_log(
+        "watcher",
+        action,
+        Some(source_path.trim()),
+        dest_root.as_deref().map(str::trim),
+        i64::try_from(total_bytes).unwrap_or(0),
+        "info",
+        Some(&details),
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+fn send_test_incoming_notification(app_handle: AppHandle) -> Result<IncomingFileEvent, String> {
+    trigger_test_incoming_notification(&app_handle)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1262,8 +1324,10 @@ pub fn run() {
             app.manage(CleanerState::default());
             app.manage(RamState::default());
             app.manage(RamAutoState::from_config(ram_auto_cfg));
+            app.manage(WatcherState::from_settings(&saved_settings));
 
             spawn_ram_auto_monitor(app.handle().clone());
+            spawn_incoming_file_watcher(app.handle().clone());
 
             Ok(())
         })
@@ -1321,6 +1385,9 @@ pub fn run() {
             download_and_install_update,
             get_windows_theme,
             apply_native_window_theme,
+            get_watched_folders_info,
+            respond_incoming_file_decision,
+            send_test_incoming_notification,
         ])
         .run(tauri::generate_context!())
         .expect("Error crítico al iniciar DiskVault Clean");

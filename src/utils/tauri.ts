@@ -10,6 +10,7 @@ import type {
   CloseGroupResult,
   FileNode,
   FileSection,
+  IncomingFileEvent,
   InstalledApp,
   InstallUpdateRequest,
   LeftoverCleanRequest,
@@ -32,6 +33,7 @@ import type {
   TransferResult,
   UninstallExecutionResult,
   UpdateCheckResult,
+  WatchedFoldersInfo,
   WindowsThemeInfo,
 } from '../types';
 
@@ -441,6 +443,21 @@ export async function invokeApplyNativeWindowTheme(mode: ThemeMode): Promise<voi
   await invoke<void>('apply_native_window_theme', { mode });
 }
 
+// ==================== IPC DETECTOR AUTOMÁTICO DE ARCHIVOS NUEVOS ====================
 
+export async function fetchWatchedFoldersInfo(): Promise<WatchedFoldersInfo> {
+  return invoke<WatchedFoldersInfo>('get_watched_folders_info');
+}
 
+export async function invokeRespondIncomingFileDecision(params: {
+  sourcePath: string;
+  destRoot: string | null;
+  copiedToNas: boolean;
+  totalBytes: number;
+}): Promise<void> {
+  await invoke<void>('respond_incoming_file_decision', params);
+}
 
+export async function invokeSendTestIncomingNotification(): Promise<IncomingFileEvent> {
+  return invoke<IncomingFileEvent>('send_test_incoming_notification');
+}

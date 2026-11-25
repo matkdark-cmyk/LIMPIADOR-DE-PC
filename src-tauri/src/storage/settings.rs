@@ -13,6 +13,9 @@ const KEY_CLEANER_EXCLUDED: &str = "cleaner_excluded_paths";
 const KEY_NAS_DEFAULT_MODE: &str = "nas_default_mode";
 const KEY_START_WITH_WINDOWS: &str = "start_with_windows";
 const KEY_ALWAYS_RUN_AS_ADMIN: &str = "always_run_as_admin";
+const KEY_WATCH_INCOMING_FILES: &str = "watch_incoming_files";
+const KEY_WATCH_MIN_SIZE_MB: &str = "watch_min_size_mb";
+const KEY_WATCHED_EXTRA_FOLDERS: &str = "watched_extra_folders";
 
 /// Configuración consolidada de DiskVault Clean persistida en la tabla `settings` de SQLite.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,9 +31,19 @@ pub struct AppSettings {
     pub start_with_windows: bool,
     #[serde(default = "default_always_run_as_admin")]
     pub always_run_as_admin: bool,
+    #[serde(default = "default_watch_incoming_files")]
+    pub watch_incoming_files: bool,
+    #[serde(default)]
+    pub watch_min_size_mb: u32,
+    #[serde(default)]
+    pub watched_extra_folders: Vec<String>,
 }
 
 fn default_always_run_as_admin() -> bool {
+    true
+}
+
+fn default_watch_incoming_files() -> bool {
     true
 }
 
@@ -46,6 +59,9 @@ impl Default for AppSettings {
             nas_default_mode: "archive_free".to_string(),
             start_with_windows: false,
             always_run_as_admin: true,
+            watch_incoming_files: true,
+            watch_min_size_mb: 0,
+            watched_extra_folders: Vec::new(),
         }
     }
 }
@@ -60,6 +76,7 @@ impl AppSettings {
         };
 
         self.default_inactive_days = self.default_inactive_days.clamp(1, 3650);
+        self.watch_min_size_mb = self.watch_min_size_mb.min(10_240);
 
         self.nas_default_mode = match self.nas_default_mode.trim().to_ascii_lowercase().as_str() {
             "move_symlink" => "move_symlink".to_string(),
@@ -69,6 +86,7 @@ impl AppSettings {
 
         self.ram_excluded_processes = dedupe_clean_list(self.ram_excluded_processes, true);
         self.cleaner_excluded_paths = dedupe_clean_list(self.cleaner_excluded_paths, false);
+        self.watched_extra_folders = dedupe_clean_list(self.watched_extra_folders, false);
 
         // Regla estricta Portable: cero escritura al Registro de Windows
         if is_portable {
@@ -160,6 +178,21 @@ pub fn load_settings_from_db(db: &Database, is_portable: bool) -> AppSettings {
         defaults.always_run_as_admin,
     );
 
+    let watch_incoming_files = parse_bool(
+        db.get_setting(KEY_WATCH_INCOMING_FILES).ok().flatten(),
+        defaults.watch_incoming_files,
+    );
+
+    let watch_min_size_mb = db
+        .get_setting(KEY_WATCH_MIN_SIZE_MB)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(defaults.watch_min_size_mb);
+
+    let watched_extra_folders =
+        parse_string_vec(db.get_setting(KEY_WATCHED_EXTRA_FOLDERS).ok().flatten());
+
     AppSettings {
         theme,
         default_use_recycle_bin,
@@ -170,6 +203,9 @@ pub fn load_settings_from_db(db: &Database, is_portable: bool) -> AppSettings {
         nas_default_mode,
         start_with_windows,
         always_run_as_admin,
+        watch_incoming_files,
+        watch_min_size_mb,
+        watched_extra_folders,
     }
     .sanitized(is_portable)
 }
@@ -186,6 +222,8 @@ pub fn save_settings_to_db(
         .map_err(|err| format!("No se pudo serializar exclusiones de RAM: {err}"))?;
     let cleaner_json = serde_json::to_string(&clean.cleaner_excluded_paths)
         .map_err(|err| format!("No se pudo serializar exclusiones de caché: {err}"))?;
+    let watched_json = serde_json::to_string(&clean.watched_extra_folders)
+        .map_err(|err| format!("No se pudo serializar carpetas vigiladas adicionales: {err}"))?;
 
     db.save_setting(KEY_THEME, &clean.theme)?;
     db.save_setting(
@@ -224,6 +262,16 @@ pub fn save_settings_to_db(
             "false"
         },
     )?;
+    db.save_setting(
+        KEY_WATCH_INCOMING_FILES,
+        if clean.watch_incoming_files {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    db.save_setting(KEY_WATCH_MIN_SIZE_MB, &clean.watch_min_size_mb.to_string())?;
+    db.save_setting(KEY_WATCHED_EXTRA_FOLDERS, &watched_json)?;
 
     Ok(clean)
 }
@@ -452,6 +500,9 @@ mod tests {
         assert_eq!(loaded_default.nas_default_mode, "archive_free");
         assert!(!loaded_default.start_with_windows);
         assert!(loaded_default.always_run_as_admin);
+        assert!(loaded_default.watch_incoming_files);
+        assert_eq!(loaded_default.watch_min_size_mb, 0);
+        assert!(loaded_default.watched_extra_folders.is_empty());
         assert!(loaded_default.ram_excluded_processes.is_empty());
         assert!(loaded_default.cleaner_excluded_paths.is_empty());
 
@@ -465,6 +516,9 @@ mod tests {
             nas_default_mode: "move_symlink".to_string(),
             start_with_windows: true,
             always_run_as_admin: false,
+            watch_incoming_files: false,
+            watch_min_size_mb: 25,
+            watched_extra_folders: vec![r"D:\DescargasExternas".to_string()],
         };
 
         let saved = save_settings_to_db(&db, custom, false).expect("debe guardar ajustes");
@@ -472,6 +526,9 @@ mod tests {
         assert_eq!(saved.default_inactive_days, 60);
         assert!(saved.start_with_windows);
         assert!(!saved.always_run_as_admin);
+        assert!(!saved.watch_incoming_files);
+        assert_eq!(saved.watch_min_size_mb, 25);
+        assert_eq!(saved.watched_extra_folders.len(), 1);
 
         let reloaded = load_settings_from_db(&db, false);
         assert_eq!(reloaded, saved);

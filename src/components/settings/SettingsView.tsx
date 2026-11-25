@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  Bell,
   ChevronLeft,
   ChevronRight,
   Database,
@@ -29,13 +30,20 @@ import { useAppStore } from '../../store/useAppStore';
 import { useCleanerStore } from '../../store/useCleanerStore';
 import { useNasStore } from '../../store/useNasStore';
 import { useUpdaterStore } from '../../store/useUpdaterStore';
-import type { InactiveDaysOption, ThemeMode, TransferMode } from '../../types';
+import type {
+  InactiveDaysOption,
+  ThemeMode,
+  TransferMode,
+  WatchedFoldersInfo,
+} from '../../types';
 import { formatBytes, formatDateTime } from '../../utils/format';
 import { formatActionName, formatModuleName } from '../../utils/formatters';
 import {
+  fetchWatchedFoldersInfo,
   invokeClearOldAuditLogs,
   invokeExportAuditLogs,
   invokeOpenDataFolder,
+  invokeSendTestIncomingNotification,
   pickFolderDialog,
   saveExportFileDialog,
 } from '../../utils/tauri';
@@ -63,10 +71,19 @@ const AUDIT_MODULE_FILTERS: { id: string; label: string }[] = [
   { id: 'all', label: 'Todos' },
   { id: 'analyzer', label: 'Analizador' },
   { id: 'nas', label: 'Mover al NAS' },
+  { id: 'watcher', label: 'Detector de Archivos' },
   { id: 'apps', label: 'Aplicaciones' },
   { id: 'cleaner', label: 'Limpieza' },
   { id: 'ram', label: 'Memoria RAM' },
   { id: 'settings', label: 'Ajustes' },
+];
+
+const WATCH_MIN_SIZE_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: 'Todos los archivos y carpetas nuevos' },
+  { value: 1, label: 'Solo desde 1 MB o más' },
+  { value: 10, label: 'Solo desde 10 MB o más' },
+  { value: 50, label: 'Solo desde 50 MB o más' },
+  { value: 100, label: 'Solo desde 100 MB o más' },
 ];
 
 const LOGS_PER_PAGE = 8;
@@ -113,6 +130,8 @@ export function SettingsView() {
   const [isExporting, setIsExporting] = useState(false);
   const [isCleaningLogs, setIsCleaningLogs] = useState(false);
   const [isOpeningFolder, setIsOpeningFolder] = useState(false);
+  const [isSendingTestNotif, setIsSendingTestNotif] = useState(false);
+  const [watchedInfo, setWatchedInfo] = useState<WatchedFoldersInfo | null>(null);
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [cleanLogsModalOpen, setCleanLogsModalOpen] = useState(false);
 
@@ -128,6 +147,9 @@ export function SettingsView() {
     }
     void loadSettings();
     void refreshAuditLogs(200);
+    void fetchWatchedFoldersInfo()
+      .then((info) => setWatchedInfo(info))
+      .catch(() => {});
   }, [isTauri, loadSettings, refreshAuditLogs]);
 
   // Reiniciar paginación al cambiar el filtro de módulo
@@ -261,6 +283,95 @@ export function SettingsView() {
   const handleGoToNasTargets = () => {
     useNasStore.getState().setActiveSubTab('targets');
     setActiveRoute('nas');
+  };
+
+  const handleAddWatchedExtraFolder = async () => {
+    if (!isTauri) {
+      addToast({
+        title: 'Selector disponible en escritorio',
+        message: 'Ejecuta DiskVault Clean en Windows para vigilar una carpeta adicional.',
+        variant: 'info',
+      });
+      return;
+    }
+    try {
+      const selected = await pickFolderDialog(
+        'Elegir carpeta adicional para detectar archivos nuevos',
+      );
+      if (!selected) {
+        return;
+      }
+      const alreadyExists = settings.watchedExtraFolders.some(
+        (p) => p.toLowerCase() === selected.toLowerCase(),
+      );
+      if (alreadyExists) {
+        addToast({
+          title: 'Carpeta ya vigilada',
+          message: 'Esta carpeta ya está incluida en el detector automático.',
+          variant: 'info',
+        });
+        return;
+      }
+      const saved = await updateSettings(
+        { watchedExtraFolders: [...settings.watchedExtraFolders, selected] },
+        { toastTitle: 'Carpeta añadida al detector automático' },
+      );
+      if (saved) {
+        void fetchWatchedFoldersInfo()
+          .then((info) => setWatchedInfo(info))
+          .catch(() => {});
+      }
+    } catch (err) {
+      addToast({
+        title: 'No se pudo seleccionar la carpeta',
+        message: extractError(err),
+        variant: 'error',
+      });
+    }
+  };
+
+  const handleRemoveWatchedExtraFolder = async (folderPath: string) => {
+    const updated = settings.watchedExtraFolders.filter((p) => p !== folderPath);
+    const saved = await updateSettings(
+      { watchedExtraFolders: updated },
+      { toastTitle: 'Carpeta quitada del detector automático' },
+    );
+    if (saved) {
+      void fetchWatchedFoldersInfo()
+        .then((info) => setWatchedInfo(info))
+        .catch(() => {});
+    }
+  };
+
+  const handleSendTestIncomingNotification = async () => {
+    if (!isTauri) {
+      addToast({
+        title: 'Notificaciones nativas disponibles en Windows',
+        message:
+          'Al ejecutar DiskVault Clean en Windows aparecerá la notificación nativa en el Centro de Notificaciones.',
+        variant: 'info',
+      });
+      return;
+    }
+    setIsSendingTestNotif(true);
+    try {
+      await invokeSendTestIncomingNotification();
+      addToast({
+        title: 'Notificación de prueba enviada a Windows',
+        message:
+          'Revisa la esquina inferior derecha (Centro de Notificaciones de Windows) para probar los botones "Copiar al NAS" y "Solo dejar en PC".',
+        variant: 'success',
+        durationMs: 6500,
+      });
+    } catch (err) {
+      addToast({
+        title: 'No se pudo enviar la notificación de Windows',
+        message: extractError(err),
+        variant: 'error',
+      });
+    } finally {
+      setIsSendingTestNotif(false);
+    }
   };
 
   const handleOpenDataFolder = async () => {
@@ -812,6 +923,193 @@ export function SettingsView() {
         </div>
       </section>
 
+      {/* 2B. DETECTOR AUTOMÁTICO DE ARCHIVOS NUEVOS (NOTIFICACIONES DE WINDOWS) */}
+      <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <Bell className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+              <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                Detector Automático de Archivos Nuevos (Notificaciones de Windows)
+              </h2>
+            </div>
+            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+              Detecta automáticamente descargas de internet o archivos y carpetas copiados desde
+              discos externos o memorias USB, y muestra una notificación nativa de Windows para
+              copiarlos directo al NAS o dejarlos solo en tu PC.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            disabled={isSendingTestNotif}
+            onClick={() => void handleSendTestIncomingNotification()}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3.5 py-2 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-100 disabled:opacity-50 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-950/70"
+          >
+            {isSendingTestNotif ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Bell className="h-3.5 w-3.5" />
+            )}
+            Probar notificación de Windows
+          </button>
+        </div>
+
+        <div className="space-y-5">
+          {/* Switch principal */}
+          <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-5 dark:border-slate-800">
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                Notificar automáticamente al detectar archivos nuevos o copiados
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Espera a que la descarga o copia desde USB finalice antes de mostrar el aviso en el
+                Centro de Notificaciones de Windows.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.watchIncomingFiles}
+              disabled={isSavingSettings}
+              onClick={async () => {
+                const nextVal = !settings.watchIncomingFiles;
+                const saved = await updateSettings(
+                  { watchIncomingFiles: nextVal },
+                  {
+                    toastTitle: nextVal
+                      ? 'Detector automático de archivos activado'
+                      : 'Detector automático de archivos desactivado',
+                  },
+                );
+                if (saved && isTauri) {
+                  void fetchWatchedFoldersInfo()
+                    .then((info) => setWatchedInfo(info))
+                    .catch(() => {});
+                }
+              }}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                settings.watchIncomingFiles
+                  ? 'bg-blue-600 dark:bg-blue-500'
+                  : 'bg-slate-300 dark:bg-slate-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  settings.watchIncomingFiles ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Tamaño mínimo */}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="space-y-1.5">
+              <label
+                htmlFor="watch-min-size-select"
+                className="block text-xs font-semibold text-slate-700 dark:text-slate-300"
+              >
+                Tamaño mínimo para mostrar notificación
+              </label>
+              <select
+                id="watch-min-size-select"
+                value={settings.watchMinSizeMb}
+                disabled={isSavingSettings || !settings.watchIncomingFiles}
+                onChange={(e) =>
+                  void updateSettings(
+                    { watchMinSizeMb: Number(e.target.value) },
+                    { toastTitle: 'Umbral del detector actualizado' },
+                  )
+                }
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:bg-white focus:outline-none disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+              >
+                {WATCH_MIN_SIZE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Carpetas de Windows vigiladas automáticamente
+              </p>
+              <div className="flex flex-wrap gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-950/60 dark:text-slate-300">
+                {(watchedInfo?.folders.filter((f) => f.isDefault) ?? [
+                  { label: 'Descargas', path: '', isDefault: true, exists: true },
+                  { label: 'Escritorio', path: '', isDefault: true, exists: true },
+                  { label: 'Documentos', path: '', isDefault: true, exists: true },
+                  { label: 'Vídeos', path: '', isDefault: true, exists: true },
+                  { label: 'Imágenes', path: '', isDefault: true, exists: true },
+                ]).map((folder) => (
+                  <span
+                    key={folder.label}
+                    title={folder.path || folder.label}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                  >
+                    {folder.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Carpetas adicionales personalizadas */}
+          <div className="space-y-3 border-t border-slate-100 pt-5 dark:border-slate-800">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                  Carpetas adicionales vigiladas
+                </p>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  Añade otras rutas (por ejemplo en tu disco D: o carpetas de proyectos) donde
+                  sueles copiar archivos desde memorias USB o discos externos.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isSavingSettings}
+                onClick={() => void handleAddWatchedExtraFolder()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <FolderPlus className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                Agregar carpeta a vigilar...
+              </button>
+            </div>
+
+            {settings.watchedExtraFolders.length > 0 ? (
+              <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
+                {settings.watchedExtraFolders.map((folderPath) => (
+                  <li
+                    key={folderPath}
+                    className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-xs"
+                  >
+                    <span className="truncate font-mono text-slate-700 dark:text-slate-300">
+                      {folderPath}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleRemoveWatchedExtraFolder(folderPath)}
+                      aria-label={`Quitar carpeta vigilada ${folderPath}`}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-slate-500 transition-colors hover:bg-red-50 hover:text-red-700 dark:text-slate-400 dark:hover:bg-red-950/60 dark:hover:text-red-300"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Quitar
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                No hay carpetas adicionales configuradas. Las 5 carpetas principales de Windows ya
+                están cubiertas automáticamente.
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+
       {/* 3. REGISTRO DE ACTIVIDAD (AUDITORÍA) Y DATOS */}
       <section className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col gap-4 border-b border-slate-200 p-6 lg:flex-row lg:items-center lg:justify-between dark:border-slate-800">
@@ -1058,7 +1356,7 @@ export function SettingsView() {
           <div className="space-y-1">
             <p className="text-xs text-slate-500 dark:text-slate-400">Versión de DiskVault Clean</p>
             <p className="font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
-              v{appStatus?.appVersion ?? '1.3.2'}
+              v{appStatus?.appVersion ?? '1.4.0'}
             </p>
           </div>
 

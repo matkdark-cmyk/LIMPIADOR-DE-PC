@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  IncomingFileEvent,
   NasConnectionStatus,
   NasTarget,
   ThreatScanReport,
@@ -19,6 +20,7 @@ import {
   invokePauseTransfer,
   invokePreviewTransferSource,
   invokeRecordThreatDecision,
+  invokeRespondIncomingFileDecision,
   invokeResumeTransfer,
   invokeSaveNasTarget,
   invokeScanTransferThreats,
@@ -76,6 +78,9 @@ interface NasStoreState {
   lastTransferResult: TransferResult | null;
   lastTransferError: string | null;
 
+  incomingQueue: IncomingFileEvent[];
+  activeIncomingFile: IncomingFileEvent | null;
+
   setActiveSubTab: (tab: NasSectionTab) => void;
   loadTargetsAndHistory: () => Promise<void>;
   saveTarget: (name: string, path: string) => Promise<boolean>;
@@ -109,6 +114,16 @@ interface NasStoreState {
   cancelTransfer: () => Promise<void>;
   setTransferProgress: (progress: TransferProgress) => void;
   clearLastTransferBanner: () => void;
+
+  registerIncomingFile: (event: IncomingFileEvent) => void;
+  openIncomingFileModal: (id: string) => Promise<void>;
+  closeIncomingFileModal: () => void;
+  keepIncomingFileOnPc: (id: string, silent?: boolean) => Promise<void>;
+  sendIncomingFileToNas: (
+    event: IncomingFileEvent,
+    destRoot: string,
+    mode: TransferMode,
+  ) => Promise<void>;
 }
 
 export const useNasStore = create<NasStoreState>((set, get) => ({
@@ -144,6 +159,9 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
   transferProgress: null,
   lastTransferResult: null,
   lastTransferError: null,
+
+  incomingQueue: [],
+  activeIncomingFile: null,
 
   setActiveSubTab: (tab) => set({ activeSubTab: tab }),
 
@@ -759,5 +777,123 @@ export const useNasStore = create<NasStoreState>((set, get) => ({
       lastTransferError: null,
       transferProgress: null,
     });
+  },
+
+  registerIncomingFile: (event) => {
+    set((state) => ({
+      incomingQueue: [
+        ...state.incomingQueue.filter((item) => item.id !== event.id).slice(-14),
+        event,
+      ],
+    }));
+  },
+
+  openIncomingFileModal: async (id) => {
+    if (isTauriRuntime() && get().targets.length === 0) {
+      try {
+        const targets = await fetchNasTargets();
+        set({ targets });
+      } catch {
+        // Ignorar fallo secundario; el usuario siempre puede elegir otra carpeta manual
+      }
+    }
+
+    const found = get().incomingQueue.find((item) => item.id === id) ?? null;
+    if (found) {
+      set({ activeIncomingFile: found });
+    }
+  },
+
+  closeIncomingFileModal: () => {
+    set({ activeIncomingFile: null });
+  },
+
+  keepIncomingFileOnPc: async (id, silent = false) => {
+    const found =
+      get().incomingQueue.find((item) => item.id === id) ??
+      (get().activeIncomingFile?.id === id ? get().activeIncomingFile : null);
+
+    set((state) => ({
+      incomingQueue: state.incomingQueue.filter((item) => item.id !== id),
+      activeIncomingFile: state.activeIncomingFile?.id === id ? null : state.activeIncomingFile,
+    }));
+
+    if (found && !found.isTest && isTauriRuntime()) {
+      try {
+        await invokeRespondIncomingFileDecision({
+          sourcePath: found.path,
+          destRoot: null,
+          copiedToNas: false,
+          totalBytes: found.totalBytes,
+        });
+        void useAppStore.getState().refreshAuditLogs(20);
+      } catch {
+        // Silencioso si el registro secundario falla
+      }
+    }
+
+    if (!silent && found) {
+      useAppStore.getState().addToast({
+        title: 'Conservado solo en tu PC',
+        message: `"${found.fileName}" permanecerá únicamente en ${found.originLabel}.`,
+        variant: 'info',
+      });
+    }
+  },
+
+  sendIncomingFileToNas: async (event, destRoot, mode) => {
+    const trimmedDest = destRoot.trim();
+    if (!trimmedDest) {
+      useAppStore.getState().addToast({
+        title: 'Elige una ubicación de destino',
+        message: 'Selecciona uno de tus destinos NAS disponibles o elige una carpeta/disco antes de continuar.',
+        variant: 'warning',
+      });
+      return;
+    }
+
+    set((state) => ({
+      incomingQueue: state.incomingQueue.filter((item) => item.id !== event.id),
+      activeIncomingFile:
+        state.activeIncomingFile?.id === event.id ? null : state.activeIncomingFile,
+    }));
+
+    if (event.isTest) {
+      useAppStore.getState().addToast({
+        title: 'Prueba de notificación completada',
+        message: `Si fuera un archivo real, se copiaría directamente hacia "${trimmedDest}".`,
+        variant: 'success',
+        durationMs: 6500,
+      });
+      return;
+    }
+
+    if (isTauriRuntime()) {
+      try {
+        await invokeRespondIncomingFileDecision({
+          sourcePath: event.path,
+          destRoot: trimmedDest,
+          copiedToNas: true,
+          totalBytes: event.totalBytes,
+        });
+        void useAppStore.getState().refreshAuditLogs(20);
+      } catch {
+        // Continuar incluso si falla el registro secundario
+      }
+    }
+
+    set({
+      sourcePath: event.path,
+      destRoot: trimmedDest,
+      mode,
+      activeSubTab: 'wizard',
+      preflight: null,
+      preflightError: null,
+      stoppedThreatReport: null,
+    });
+
+    useAppStore.getState().setActiveRoute('nas');
+    void get().runPreflight();
+    get().requestStartTransfer();
   },
 }));

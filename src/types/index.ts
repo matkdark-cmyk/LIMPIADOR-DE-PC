@@ -25,6 +25,8 @@ export type {
 } from './scanner';
 
 export type {
+  IncomingFileActionEvent,
+  IncomingFileEvent,
   NasConnectionStatus,
   NasTarget,
   ThreatFinding,
@@ -37,6 +39,8 @@ export type {
   TransferProgress,
   TransferRequest,
   TransferResult,
+  WatchedFolderEntry,
+  WatchedFoldersInfo,
 } from './nas';
 
 export type {

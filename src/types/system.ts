@@ -29,6 +29,9 @@ export interface AppSettings {
   nasDefaultMode: 'archive_free' | 'move_symlink' | 'copy_backup';
   startWithWindows: boolean;
   alwaysRunAsAdmin: boolean;
+  watchIncomingFiles: boolean;
+  watchMinSizeMb: number;
+  watchedExtraFolders: string[];
 }
 
 export interface AppStatus {
